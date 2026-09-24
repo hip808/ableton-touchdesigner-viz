@@ -10,9 +10,8 @@
 //   uBand0-7 float  - 8-band spectrum, 0..1 each
 //   uTimeSec float  - elapsed seconds -> op('control')['level'] etc, or type absTime.seconds
 //   uMode    float  - which pattern to draw: 0=waveform, 1=multi-wave, 2=raster bars (ring),
-//                     3=moire, 4=polar burst, 5=raster bars (no ring), 6=chromatic bars
-//                     (rainbow bg + glowing bars), 7=aurora (rainbow bg + filled wave
-//                     blob + thin traces). type a whole number 0-7.
+//                     3=moire, 4=polar burst, 5=Tron equalizer (glowing LED bars on
+//                     black), 6=chromatic bars, 7=aurora. type 0-7.
 //   uGain    float  - sensitivity multiplier for uLevel/uBand0-7, since raw RMS values
 //                     from a real mix are usually small (0.01-0.1). Type a number like
 //                     4-15 directly into its Value box and raise/lower until it feels right.
@@ -44,8 +43,21 @@ uniform float uGain;
 uniform float uColorMix;
 uniform float uWaveSpeed;
 uniform float uWavePhase; // accumulated animation clock from a TD Speed CHOP -- see waveformY
+
+// uWavePhase grows forever over a long session (it's a real accumulator, not a bug) --
+// wrapped here to a bounded range so float precision in sin()/hash() doesn't degrade
+// after the value gets into the thousands. A large modulus means the wrap-around only
+// happens once every several minutes, so it's imperceptible in practice.
+float wp() { return mod(uWavePhase, 2000.0); }
+
 uniform float uWaveSize;
 uniform float uLineWidth; // global thickness multiplier for all lines/edges. try 0.3-3.0, 1.0 = default
+
+// mode 5 (Tron equalizer) only:
+uniform float uBarWidth;    // 0..1, bar width: 0 = fully vanished, 1 = bars touch with no gap
+uniform float uHueBase;     // base hue offset for the whole palette (bind to a fader for "color spectrum"), 0..1
+uniform float uHueOscillate; // 0..1, how far the hue swings back and forth around uHueBase over time
+uniform float uLineDensity; // 0..1, mode 5 only: how many evenly-spaced lines subdivide each bar (1 to 14)
 
 out vec4 fragColor;
 
@@ -61,12 +73,16 @@ vec3 tint(float hue) {
 	return mix(vec3(1.0), hsv2rgb(vec3(hue, 0.85, 1.0)), uColorMix);
 }
 
+// uHueBase plus a slow sine wobble around it, sized by uHueOscillate. Uses wp() (not raw
+// uWavePhase) for the same jump-free-on-speed-change reason as everywhere else that animates.
+float hueBase() { return uHueBase + sin(wp() * 0.3) * uHueOscillate * 0.5; }
+
 // full-screen drifting rainbow stripes, used as a background wash for the "rich/bright"
 // modes -- kept darker than the foreground line work so lines/bars still read clearly.
 vec3 rainbowBG(vec2 uv) {
 	// small fixed-rate baseline (always flows, never jumps -- constant coefficient) plus
 	// an accumulator-driven component tied to the speed knob (also jump-free, see uWavePhase)
-	float hue = fract(uv.y * 1.4 + uTimeSec * 0.008 + uWavePhase * 0.02);
+	float hue = fract(uv.y * 1.4 + uTimeSec * 0.008 + wp() * 0.02);
 	return hsv2rgb(vec3(hue, 0.85, 0.55));
 }
 
@@ -79,17 +95,106 @@ float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
+// mode 5: Tron-style LED equalizer -- 8 glowing vertical bars over a plain black
+// background. uBarWidth reshapes the bars themselves, uHueBase shifts the whole
+// palette (bind to a fader for a live "color spectrum" sweep).
+// subdivides each mirrored band column into several evenly-spaced thin lines, all sharing
+// that band's own height (same silhouette as the main bar) -- uLineDensity controls how
+// many lines per column, uBarWidth controls their individual thickness (same knob as the
+// main bars). This replaces solid fill with an evenly-spaced "comb" that still traces the
+// exact same equalizer shape, rather than random independent decoration.
+void addExtraLines(vec2 uv, float bands[8], inout vec3 col) {
+	float mx = abs(uv.x - 0.5) * 2.0;
+	float colF = mx * 8.0;
+	int idx = clamp(int(floor(colF)), 0, 7);
+	float localX = fract(colF);
+	float bandVal = bands[idx];
+
+	float N = floor(mix(1.0, 14.0, clamp(uLineDensity, 0.0, 1.0)));
+	float cellPos = fract(localX * N);
+	float distToLine = abs(cellPos - 0.5) / N;
+	float w = mix(0.0008, 0.018, clamp(uBarWidth, 0.0, 1.0));
+	float aa = fwidth(localX) * 1.5 + 0.0015;
+	float lineMask = smoothstep(w + aa, w - aa, distToLine);
+
+	// exact same height/edges as the main bar in sceneTronEQ, so every line traces the
+	// same silhouette instead of having its own independent shape
+	float halfH = clamp(bandVal * 0.58, 0.0, 0.49);
+	float top = 0.5 + halfH;
+	float bottom = 0.5 - halfH;
+	float edgeAA = fwidth(uv.y) * 1.5 + 0.0015;
+	float lit = smoothstep(top + edgeAA, top - edgeAA, uv.y) * smoothstep(bottom - edgeAA, bottom + edgeAA, uv.y);
+
+	vec3 lineColor = tint(fract(hueBase() + float(idx) / 8.0 * 0.4));
+	// everything renders additively, so adding a matching color on top of an already-lit
+	// bar just brightens/washes that patch out instead of blending in. scale the
+	// contribution down wherever col is already bright, so lines recede into lit bars and
+	// only stand out clearly in the dark gaps around/between them
+	float existing = max(col.r, max(col.g, col.b));
+	float headroom = 1.0 - clamp(existing, 0.0, 1.0);
+	col += lineColor * lineMask * lit * headroom * 0.9;
+}
+
+void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
+	col = vec3(0.0); // plain black background
+
+	// mirror left/right around the center for a balanced, symmetric layout -- lowest band
+	// in the two center columns, highest band at the two outer edges
+	float mx = abs(uv.x - 0.5) * 2.0;
+	int idx = clamp(int(floor(mx * 8.0)), 0, 7);
+	float bandVal = bands[idx];
+	float localX = fract(mx * 8.0);
+
+	float halfGap = clamp((1.0 - uBarWidth) * 0.5, 0.0, 0.5); // 0.5 at uBarWidth=0 -> fully vanished
+	// soft (anti-aliased) left/right edges instead of a hard step -- a hard step reads as
+	// a flat-walled box once the bar gets wide; this keeps it looking like a glowing
+	// column with feathered sides no matter how wide it gets
+	float edgeAAx = fwidth(localX) * 1.5 + 0.006;
+	float inColumn = smoothstep(halfGap - edgeAAx, halfGap + edgeAAx, localX)
+	                * smoothstep(1.0 - halfGap + edgeAAx, 1.0 - halfGap - edgeAAx, localX);
+
+	float halfH = clamp(bandVal * 0.58, 0.0, 0.49); // bars grow outward from the center, both ways
+	float top = 0.5 + halfH;
+	float bottom = 0.5 - halfH;
+	// anti-aliased edges instead of a hard step -- a hard threshold means the bar snaps
+	// fully lit/unlit as the audio-driven height crosses a pixel row, which reads as flicker
+	float edgeAA = fwidth(uv.y) * 1.5 + 0.0015;
+	float litTop = smoothstep(top + edgeAA, top - edgeAA, uv.y);
+	float litBottom = smoothstep(bottom - edgeAA, bottom + edgeAA, uv.y);
+	float lit = litTop * litBottom;
+
+	vec3 barColor = tint(fract(hueBase() + float(idx) / 8.0 * 0.4));
+	col += barColor * inColumn * lit * 0.95;
+
+	// bright glowing tips at both the top and bottom edge of each active bar
+	float tipGlowTop = exp(-abs(uv.y - top) * 25.0) * step(uv.y, top + 0.05);
+	float tipGlowBottom = exp(-abs(uv.y - bottom) * 25.0) * step(bottom - 0.05, uv.y);
+	col += barColor * inColumn * (tipGlowTop + tipGlowBottom) * 0.6;
+
+	addExtraLines(uv, bands, col);
+}
+
+// neon-style falloff: a hard bright core plus a soft glowing halo around it, both scaled
+// by the same width -- this is what makes every line in the piece read as a glowing tube
+// rather than a flat stroke (the Tron look), used by both gridLine and hLine below.
+float neonFalloff(float d, float width) {
+	float w = max(width * uLineWidth, 0.0005);
+	float core = smoothstep(w, 0.0, d);
+	float glow = exp(-d * (6.0 / w)) * 0.55;
+	return clamp(core + glow, 0.0, 1.0);
+}
+
 // thin monochrome grid line, width controlled by band energy. "width" is always
 // scaled by uLineWidth here, so every caller respects the global thickness knob.
 float gridLine(float coord, float cells, float width) {
 	float f = fract(coord * cells);
 	float d = min(f, 1.0 - f);
-	return smoothstep(width * uLineWidth, 0.0, d);
+	return neonFalloff(d, width);
 }
 
 // thin horizontal line at height y0, thickness "width" in uv units, scaled by uLineWidth
 float hLine(float y, float y0, float width) {
-	return smoothstep(width * uLineWidth, 0.0, abs(y - y0));
+	return neonFalloff(abs(y - y0), width);
 }
 
 void sceneRasterBars(vec2 uv, vec2 res, vec2 pix, float bands[8], inout vec3 col, bool showRing) {
@@ -134,7 +239,7 @@ float waveformY(float x, float bands[8], float laneAmp, float phase, float speed
 	for (int i = 0; i < 8; i++) {
 		float freq = 3.0 + float(i) * 5.0;
 		float amp = bands[i] * laneAmp; // 0 when silent -> perfectly straight line
-		y += sin(x * freq * 6.2831 + phase + uWavePhase * speedMult * (1.0 + float(i) * 0.3)) * amp;
+		y += sin(x * freq * 6.2831 + phase + wp() * speedMult * (1.0 + float(i) * 0.3)) * amp;
 	}
 	return y;
 }
@@ -162,7 +267,7 @@ void sceneMultiWave(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float laneAmp = (0.05 + 0.01 * fj) * size;
 		float y = waveformY(uv.x, bands, laneAmp, phase, 0.6 + 0.08 * fj);
 		float line = hLine(uv.y, 0.5 + y, 0.0016);
-		float hue = fract(fj / float(TRACES) + uWavePhase * 0.06);
+		float hue = fract(fj / float(TRACES) + wp() * 0.06);
 		col += tint(hue) * line * 0.85;
 	}
 
@@ -281,8 +386,8 @@ void main() {
 	);
 
 	// uMode mapping: 0=waveform, 1=multi-wave, 2=raster bars (with ring),
-	// 3=moire, 4=polar burst, 5=raster bars (no ring), 6=chromatic bars,
-	// 7=aurora. anything else falls back to 5's look (raster bars, no ring).
+	// 3=moire, 4=polar burst, 5=Tron equalizer, 6=chromatic bars, 7=aurora.
+	// anything out of range falls back to plain raster bars (no ring).
 	int mode = int(uMode + 0.5);
 	if (mode == 0) {
 		sceneWaveform(uv, res, bands, col);
@@ -294,6 +399,8 @@ void main() {
 		sceneMoire(uv, res, col);
 	} else if (mode == 4) {
 		scenePolarBurst(uv, res, bands, col);
+	} else if (mode == 5) {
+		sceneTronEQ(uv, res, bands, col);
 	} else if (mode == 6) {
 		sceneChromaticBars(uv, res, bands, col);
 	} else if (mode == 7) {
