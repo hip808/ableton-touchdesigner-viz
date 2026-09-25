@@ -1,79 +1,184 @@
 # Control reference
 
 Everything the visuals respond to: shader uniforms, what each one does, and the exact
-MIDI binding currently wired up in `glsl1`'s Vectors page. All expressions below are typed
-directly into a Vector row's first Value box in TD (Name = the uniform name, Value = the
-expression).
+binding wired up in `glsl1`'s Vectors page (plus a few TD-side CHOP networks for things a
+shader can't do on its own — see "Independent motion clocks" below). All expressions are
+typed directly into a Vector row's Value box in TD, or into the named parameter of the CHOP
+mentioned.
 
-The definitive saved state of all of this (network wiring, every binding) is
+The definitive saved state of all of this (every node, every binding) is
 [`ableton-touchdesigner-viz.toe`](ableton-touchdesigner-viz.toe) — open that directly rather
 than rebuilding from `ableton_viz_setup.py`, which only builds the base audio-analysis
-network and knows nothing about the MIDI layer described here.
+network and knows nothing about the MIDI/control layer described here.
 
 ## Audio-reactive uniforms (bound to the `control` CHOP, not MIDI)
 
 | Uniform | Value expression | What it is |
 |---|---|---|
-| `uLevel` | `op('control')['level']` | Overall RMS energy of Ableton's master bus, smoothed through `lag1`. |
-| `uBand0`...`uBand7` | `op('control')['band0']` ... `op('control')['band7']` | 8-band spectrum (60Hz, 150Hz, 350Hz, 800Hz, 1.8kHz, 3.8kHz, 7.5kHz, 14kHz center frequencies), same smoothing. |
+| `uLevel` | `op('control')['level']` | Overall RMS energy of Ableton's master bus. |
+| `uBand0`...`uBand7` | `op('control')['band0']` ... `op('control')['band7']` | 8-band spectrum (60Hz, 150Hz, 350Hz, 800Hz, 1.8kHz, 3.8kHz, 7.5kHz, 14kHz center frequencies). |
 | `uBeat` | `op('control')['ramp']` | 0->1 ramp per beat from the Ableton Link CHOP (`abletonlink1`), tempo-synced to Live. |
-| `uTimeSec` | `absTime.seconds` | Elapsed seconds since TD started. GLSL TOP has no built-in time uniform (see NOTES.md) — used only for small always-on drifts, never multiplied by a live knob (see `uWavePhase` below for why). |
+| `uTimeSec` | `absTime.seconds` | Elapsed seconds since TD started. Used only for small always-on drifts that don't need to be jump-free — never multiplied by a live knob (see "Independent motion clocks" for why). |
 
-## MIDI-controlled uniforms (MVAVE SMC-Mixer, Bluetooth, device ID 1 in `midiin1`)
+`gLevel()` / `gBand(b)` in the shader multiply these by `uGain` and clamp to 0..1 — use
+those, not the raw uniforms, anywhere sensitivity should track the Gain control.
 
-Each knob and the fader in the same channel strip **share the same MIDI CC** on this
-device (confirmed for channels 3, 4, and 5) — so a binding to e.g. `ch1ctrl43` responds to
-either the knob or the fader in that strip, not just one of them.
+## MIDI controller: MVAVE SMC-Mixer
 
-| Knob/Fader | MIDI channel | Uniform(s) | Value expression | Range / feel |
+**Physical CCs: knobs send CC 30–37, faders send CC 40–47** (confirmed via a raw MIDI
+monitor) — independent, not shared. **Quirk**: TD's `midiin1` CHOP has `onebased: true`,
+which adds **+1** to every raw CC number when building its channel name — physical CC30
+(Knob 1) arrives in TD as channel `ch1ctrl31`, physical CC40 (Fader 1) arrives as `ch1ctrl41`,
+and so on. **Every expression below already accounts for this** (Knob N reads
+`ch1ctrl(30+N)`, Fader N reads `ch1ctrl(40+N)`) — if you add a new binding by hand, forgetting
+the +1 makes it silently read the *previous* physical control's data instead of erroring.
+
+The 8 physical positions are numbered 1–8. Except position 1, most positions pair a
+**Fader** (base value) with a **Knob** (that value's self-oscillation rate). Rate is 0..1:
+**at 0 the parameter is fully static** — nothing breathes in the background by default;
+turning the knob up introduces oscillation, scaling both its speed and amount together from
+zero. Three knobs (2, 5's Odyssey role, and 2's Odyssey role) break this pattern and instead
+control bipolar motion directly — called out below.
+
+### Position 1 — fixed, same in every mode
+
+| Control | Physical CC → TD channel | Uniform | Expression |
+|---|---|---|---|
+| Fader 1 | 40 → `ch1ctrl41` | `uGain` | `20.0 * ((raw/127.0) ** 2.5)` — **log curve**: fine control at low gain, fast ramp only near the top |
+| Knob 1 | 30 → `ch1ctrl31` | `uMode` | `int(raw / 16.0)` — mode select, 0–7, linear (mode switching shouldn't have a curve) |
+
+### Positions 2–8 — meaning varies by mode
+
+| Pos | Fader (CC → channel) | Knob (CC → channel) | Default meaning | Odyssey (mode 7) override |
 |---|---|---|---|---|
-| 1 | `ch1ctrl41` | `uGain` | `op('/ableton_viz/midiin1')['ch1ctrl41'] / 127.0 * 20.0` | Sensitivity multiplier on `uLevel`/`uBand0-7`. 0 = flat, ~20 = fully saturated/spiky. |
-| 2 | `ch1ctrl42` | `uMode` | `int(op('/ableton_viz/midiin1')['ch1ctrl42'] / 16.0)` | Selects one of 8 visual modes, 0-7 (see table below). |
-| 3 | `ch1ctrl43` | `uColorMix` | `op('/ableton_viz/midiin1')['ch1ctrl43'] / 127.0` | 0 = monochrome white/cyan, 1 = full color cycling. |
-| 4 | `ch1ctrl44` | *(drives `lag1`, not a uniform — see below)* | — | Audio smoothing time. **Reversed**: min = slow/smooth, max = fast/snappy. |
-| 5 | `ch1ctrl45` | `uLineDensity` **+** *(feeds `uWavePhase` via a CHOP chain — see below)* | `op('/ableton_viz/midiin1')['ch1ctrl45'] / 127.0` | Mode 5 only: how many evenly-spaced lines subdivide each equalizer bar (1-14). Also drives animation speed everywhere else (no conflict — mode 5 doesn't animate). |
-| 6 | `ch1ctrl46` | `uWaveSize` **+** `uHueBase` | `op('/ableton_viz/midiin1')['ch1ctrl46'] / 127.0 * 2.5` (size) / `.../127.0` (hue, 0-1) | Amplitude/size in modes 0,1,6,7. Color-spectrum position in mode 5. No conflict — different modes. |
-| 7 | `ch1ctrl47` | `uLineWidth` **+** `uBarWidth` | `(.../127.0) ** 2 * 80.0 + 0.1` (line width) / `.../127.0` (bar width, 0-1) | Global line/edge thickness everywhere, and mode-5 bar width (0=vanished, 1=touching, no gap). |
-| 8 | `ch1ctrl48` | *(unbound — freed up when `uHueBase` moved to knob 6)* | — | Free. |
-| — | `ch1ctrl36` | `uHueOscillate` | `op('/ableton_viz/midiin1')['ch1ctrl36'] / 127.0` | Mode 5 only: how far the hue swings back and forth around `uHueBase` over time. 0 = static. |
-| — | `ch1ctrl31`, `ch1ctrl53` | *(seen, unidentified, unbound)* | — | Turned up during testing but never pinned down to a specific physical control. Free. |
+| 2 | 41 → `ch1ctrl42` | 31 → `ch1ctrl32` | **Speed** — bipolar: center=stop, log curve, ±60 max (see below) | Also drives the spoke travel/flow pattern |
+| 2 (knob only, Odyssey) | — | 31 → `ch1ctrl32` | n/a elsewhere | **Spoke rotation** — bipolar, independent of Speed: center=stationary, left=counter-clockwise, right=clockwise, log curve, ±40 max |
+| 3 | 42 → `ch1ctrl43` | 32 → `ch1ctrl33` | **uColorMix** (0=mono, 1=full color), Knob=breathing rate | Same — also colors the ring/streaks |
+| 4 | 43 → `ch1ctrl44` | 33 → `ch1ctrl34` | **Tunnel Hue** (`uTunHueBase`), Knob=breathing rate | only meaningful in mode 7 |
+| 5 | 44 → `ch1ctrl45` | 34 → `ch1ctrl35` | **Tron HueBase** (`uHueBase`), Knob=breathing rate | Fader 5 also = **Ring visibility** (`uTunRingAmount`, 0=fully vanished/stopped) |
+| 5 (knob only, Odyssey) | — | 34 → `ch1ctrl35` | n/a elsewhere | **Ring inward/outward speed** — bipolar, independent: center=stationary, right=expand outward, left=contract inward, log curve, ±40 max |
+| 6 | 45 → `ch1ctrl46` | 35 → `ch1ctrl36` | **Smooth** — audio lag time (TD-side, not a shader uniform), Knob=breathing rate | Smooth keeps running regardless of mode; Fader 6 also feeds `uHueSpreadBase` in mode 4 (Chromatic Bars) |
+| 7 | 46 → `ch1ctrl47` | 36 → `ch1ctrl37` | **uWaveSize** (amplitude, modes 0/1/2/4), Knob=breathing rate | **Spoke Density** — octave-doubling scheme, log curve (see below), *not* a breathing rate |
+| 8 | 47 → `ch1ctrl48` | 37 → `ch1ctrl38` | **uLineWidth** (global thickness), Knob=breathing rate | mode 5 (Tron): `uBarWidth`. mode 7: **Thickness** (`uTunThicknessBase`, plain value, not oscillating) |
 
-### Knob 4 — rate-of-change / smoothing time
+Positions 2 and 5's knobs do **double duty**: in every mode except Odyssey they're a
+breathing-rate knob (`uWaveSpeedRate`-style); the moment you're in mode 7 they instead
+directly drive bipolar motion (rotation / ring speed) via an independent TD-side clock. Both
+roles read the *same* physical knob — harmless, since only one shader code path is ever
+active at a time.
 
-Controls how fast the audio-reactive `control` CHOP (which everything above reads from)
-responds to changes in the underlying audio, via a Lag CHOP (`lag1`) inserted between the
-raw analysis chain and `control`.
+### Independent motion clocks (TD-side Speed CHOPs, not shader math)
 
+A shader has no memory between frames, so anything that needs to move continuously without
+jumping when you touch a knob live is built as a small TD network: a Constant CHOP computes
+the instantaneous *rate* from a knob/fader, feeding a Speed CHOP (`order=First`) that
+integrates it into an ever-changing phase — changing the rate only affects the future
+accumulation, never causes a retroactive jump. Four independent clocks exist:
+
+| Clock | Nodes | Driven by | Feeds |
+|---|---|---|---|
+| **Global speed / wp()** | `speed_curve` → `wavespeed_accum` | Fader 2 (bipolar, log curve, see below) | `uWavePhase` — spoke travel/flow, most other modes' animation |
+| **Ring growth / ringWp()** | `ring_rate` → `ring_phase_accum` | Knob 5 in Odyssey (bipolar, log curve) | `uRingPhaseRaw` — ring radius travel + its own slow rotation |
+| **Spoke rotation / rotWp()** | `spoke_rot_rate` → `spoke_rot_accum` | Knob 2 in Odyssey (bipolar, log curve) | `uSpokeRotRaw` — spoke pattern's angular offset |
+| **Stroke intensity envelope** | `stroke_level_calc` → `stroke_intensity_lag` | Gain × live level | `uStrokeIntensity` — fast-attack/slow-release brightness pop on the spokes |
+
+**Fader 2 / Speed** (`speed_curve`'s expression):
 ```python
-lag1.par.lag1.expr = "(1.0 - op('/ableton_viz/midiin1')['ch1ctrl44'] / 127.0) * 1.5"
-lag1.par.lag2.expr = "(1.0 - op('/ableton_viz/midiin1')['ch1ctrl44'] / 127.0) * 1.5"
+math.copysign(60.0 * abs((op('/ableton_viz/midi_lag')['ch1ctrl42'] - 63.5)/63.5) ** 2.5,
+              op('/ableton_viz/midi_lag')['ch1ctrl42'] - 63.5)
 ```
+Center (raw 63.5) = 0 (stopped). Bipolar, log curve (power 2.5) for fine control near the
+stop point. Max magnitude ±60 in either direction. `uWavePhase` reads
+`op('/ableton_viz/wavespeed_accum')['speed']`.
 
-Min knob = 1.5s lag (slow, drifting), max knob = 0s lag (instant, snappy).
-
-### Knob 5 — animation speed (`uWavePhase`)
-
-Not a direct MIDI-to-uniform binding. Multiplying elapsed time by a live-changing speed
-value causes a big instantaneous jump every time the knob moves (see NOTES.md), and even
-with that avoided, the accumulated phase itself grows unbounded over a long session and
-loses float precision (also in NOTES.md) — so the knob drives a TD-side accumulator chain,
-and the shader wraps that value with `wp()` before using it anywhere:
-
+**Knob 5 in Odyssey / Ring speed** (`ring_rate`'s expression):
+```python
+math.copysign(40.0 * abs((op('/ableton_viz/midi_lag')['ch1ctrl35'] - 63.5)/63.5) ** 2.5,
+              op('/ableton_viz/midi_lag')['ch1ctrl35'] - 63.5)
 ```
-midiin1['ch1ctrl45']  (raw MIDI CC, 0-127)
-  -> midi_lag          (Lag CHOP, lag1=lag2=0.4s -- smooths the knob's own movement)
-  -> wavespeed_math     (Math CHOP, gain = 3.0/127.0 -- rescales to a 0-3 "rate")
-  -> wavespeed_accum    (Speed CHOP, order=First, timeslice on -- integrates the rate
-                          into an ever-increasing "phase" value, frame by frame)
-```
+Same shape as Speed: center=stop, bipolar, log curve, max ±40. Positive = ring travels
+outward (grows); negative = ring travels inward (shrinks toward center — and the "dissolve"
+naturally reads as *condensing into solid* instead of dissolving, since the effect is keyed
+to radius/phase, not direction).
 
-`uWavePhase`'s Value expression in `glsl1`:
+**Knob 2 in Odyssey / Spoke rotation** (`spoke_rot_rate`'s expression):
+```python
+-1.0 * math.copysign(abs((op('/ableton_viz/midi_lag')['ch1ctrl32'] - 63.5)/63.5) ** 2.5,
+                      op('/ableton_viz/midi_lag')['ch1ctrl32'] - 63.5) * 40.0
 ```
-op('/ableton_viz/wavespeed_accum')['ch1ctrl45']
-```
+Center=stationary, left=counter-clockwise, right=clockwise, log curve, max ±40 rad/sec
+(fast enough at the extremes to blur into a smooth spin).
 
-`uWaveSpeed` is still declared in the shader (and may still have a Vectors row) but is no
-longer read by any scene — a legacy leftover from before this fix. Safe to delete its row.
+**Stroke intensity envelope** (`stroke_level_calc`'s expression, feeding `stroke_intensity_lag`):
+```python
+min(op('control')['level'] * (20.0 * ((op('/ableton_viz/midiin1')['ch1ctrl41'] or 0) / 127.0) ** 2.5), 3.0)
+```
+Same gain curve as `uGain` applied to live level, capped at 3.0 (not 1.0) for extra punch on
+peaks. `stroke_intensity_lag` has **lag1 (attack) = 0.05s, lag2 (release) = 1.4s** — pops up
+fast on a hit, eases back down slowly for an organic feel, rather than snapping.
+
+**Smooth** (`lag1.par.lag1`/`lag2` expression, Position 6, TD-side):
+```python
+(1.0 - op('/ableton_viz/midiin1')['ch1ctrl46']/127.0) * 1.5 *
+(1.0 + math.sin(absTime.seconds * (op('/ableton_viz/midiin1')['ch1ctrl36']/127.0)*3.0) * 0.3 *
+ (op('/ableton_viz/midiin1')['ch1ctrl36']/127.0))
+```
+Min fader = 1.5s lag (slow/drifting), max fader = 0s (instant/snappy); Knob 6 adds a
+breathing wobble on top, same zero-at-rest rule as everywhere else.
+
+### Odyssey (mode 7) spoke density — octave doubling, not a simple rescale
+
+Directly rescaling spoke *count* used to reposition every spoke as density changed, reading
+as the whole pattern spiraling. Fixed via octave doubling in `sceneTunnel`: existing spokes
+never move; each doubling fades in a second copy of the current spoke count, phase-shifted
+by exactly half a sector (i.e. sitting at the exact midpoints between existing spokes), so
+new lines genuinely grow in between rather than the pattern rearranging itself.
+
+```glsl
+float densityCurved = pow(clamp(uTunDensityBase, 0.0, 1.0), 2.5);  // log curve
+float levelProgress = densityCurved * 6.0;   // 6 doublings available
+float levelInt = floor(levelProgress);
+float levelFrac = fract(levelProgress);      // 0..1 fade-in of the new interleaved spokes
+float segOld = 4.0 * pow(2.0, levelInt);     // base 4 spokes, doubling each level
+```
+Range: 4 → 8 → 16 → 32 → 64 → 128 → 256 spokes across the fader's travel — sparse to fully
+filled-in dense.
+
+### Odyssey ring — travel, dissolve, and kick pulse
+
+The ring is a single continuously-traveling pulse (not audio-level-sized): its radius comes
+from `ringPhase = fract(ringWp())`, mapped `0 → 1.9` (well past the frame edge — genuinely
+leaves the screen). It **dissolves into smoke starting immediately, fully dissolved by
+halfway** through the travel (`dissolveT = smoothstep(0.0, 0.5, ringPhase)`), widening from a
+crisp line into a diffuse glow and fading opacity to 0 as it goes — which also conveniently
+hides the loop's reset back to phase 0. `uTunRingAmount` (Fader 5) is pure visibility: 0
+fully vanishes and stops it outright, independent of gain. A radial waveform wobble (8
+gain-scaled harmonics of angle, seamless around the full circle) rides on top and rotates
+slowly via `ringWp() * 0.6` — proportional to the ring's own growth speed, not the global
+Speed.
+
+The **whole Odyssey scene** (spokes, ring, core, everything) gets one more multiplier at the
+very end of `sceneTunnel`:
+```glsl
+float kickPulse = 1.0 + bands[0] * 2.0;  // band0 = the kick/~60Hz band, already gain-scaled
+col *= kickPulse;
+```
+So Fader 1/Gain directly controls how hard the whole scene punches on the kick.
+
+### Odyssey parameters with no live control
+
+Twist was removed entirely (spokes no longer rotate on their own — only Knob 2's independent
+rotation does that now). Three tunnel parameters are fixed at constants with zero
+oscillation, since there weren't enough physical positions left to cover all 8 original
+concepts:
+
+| Uniform | Value |
+|---|---|
+| `uTunPulseBase` / `uTunPulseRate` | `0.5` / `0.0` |
+| `uTunGlowBase` / `uTunGlowRate` | `0.6` / `0.0` |
+
+(`uTunTwistBase` and `uTunRingBand` were both deleted from the shader entirely — dead code
+from earlier iterations of the ring/spoke design.)
 
 ## `uMode` — the 8 visual modes
 
@@ -81,32 +186,30 @@ longer read by any scene — a legacy leftover from before this fix. Safe to del
 |---|---|---|
 | 0 | Waveform | Single oscilloscope trace, built from 8 summed sine waves (one per band). Color cycles slowly and continuously regardless of other knobs. |
 | 1 | Multi-wave | 14 overlapping traces sharing one center line — dense EEG/tangle look, each trace a different hue. |
-| 2 | Raster bars (ring) | 8 hard-edged vertical bars (classic Ikeda test-pattern), scanlines, crosshair, plus a beat-synced expanding ring. |
-| 3 | Moiré | Two overlapping line grids at a slowly rotating relative angle, interference fringes. |
-| 4 | Polar burst | Same 8-band bars as mode 2, but radial (angle instead of x, radius instead of height) with concentric beat rings. |
-| 5 | Tron equalizer | 8 mirrored, glowing LED-style bars on plain black, growing outward from the vertical center. Anti-aliased edges at every scale (no "boxy" look even at full width). Subdivided into evenly-spaced lines that trace the same silhouette (`uLineDensity`). Palette shifts and can oscillate (`uHueBase`/`uHueOscillate`). |
-| 6 | Chromatic bars | 32 densely-packed rainbow bars with a soft glow halo, over a drifting rainbow-striped background. Full color, no monochrome option. |
-| 7 | Aurora (Tron) | Near-black background with a big waveform silhouette rendered as a glowing neon edge outline (not a solid fill), plus 4 thin colored traces on top, all hue-shiftable via `uColorMix`. |
-| other | Fallback | Plain raster bars, no ring — same look as mode 2 minus the ring, used for any out-of-range `uMode` value. |
+| 2 | Aurora | Near-black background with a big waveform silhouette rendered as a glowing neon edge outline (not a solid fill), plus 4 thin colored traces on top, all hue-shiftable via `uColorMix`. |
+| 3 | Raster bars (ring) | 8 hard-edged vertical bars (classic Ikeda test-pattern), scanlines, crosshair, plus a beat-synced expanding ring. |
+| 4 | Chromatic bars | 32 densely-packed rainbow bars with a soft glow halo, over a drifting rainbow-striped background. Hue spread across bars adjustable (position 6) from "all bars share one evolving hue" to full spread. |
+| 5 | Tron equalizer | 8 mirrored, glowing LED-style bars on plain black, growing outward from the vertical center, with a gentle per-band traveling wave riding on top. Solid full-brightness core (no dim-when-thin), soft blur only at the top/bottom tips. Subdivided into evenly-spaced lines (`uLineDensity`). |
+| 6 | Moiré | Two overlapping line grids at a slowly rotating relative angle, interference fringes. |
+| 7 | Odyssey (Tunnel) | 2001-style light-speed tunnel: laser-thin radiating streaks (independently rotatable), a single traveling/dissolving ring (independently growable/shrinkable), a bright vanishing-point core, all kick-reactive. |
+| other | Fallback | Plain raster bars, no ring — same look as mode 3 minus the ring, used for any out-of-range `uMode` value. |
+
+**Deleted:** the old "Polar burst" mode (radial version of the raster bars) was removed
+entirely — no uniform or scene function for it remains.
 
 ## Global helpers all modes share
 
-- `gLevel()` / `gBand()` — `uLevel`/`uBandN` multiplied by `uGain` and clamped to 0-1.
-- `tint(hue)` — returns white when `uColorMix` is 0, shifts to that hue (full saturation) as it rises to 1. Used for every colorable line/bar so `uColorMix` works consistently everywhere.
-- `hueBase()` — mode 5 only: `uHueBase` plus a `uHueOscillate`-sized sine wobble, driven by the jump-free `wp()` clock.
-- `wp()` — `uWavePhase` wrapped to a bounded range so float precision doesn't degrade over a long session. Use this (never raw `uWavePhase`) anywhere something needs to animate over time.
-- `hLine()` / `gridLine()` — line-drawing primitives with a built-in neon glow (bright core + soft halo, via `neonFalloff()`) so every mode reads as glowing tubes rather than flat strokes. Both scale thickness by `uLineWidth`.
+- `gLevel()` / `gBand(b)` — `uLevel`/`uBandN` multiplied by `uGain` and clamped to 0-1.
+- `tint(hue)` — white at `uColorMix`=0, full-saturation hue at 1, self-oscillating via `uColorMixRate`.
+- `hueBase()` — Tron only: `uHueBase`, self-oscillating via `uHueBaseRate`.
+- `wp()` — `uWavePhase` wrapped to a bounded range for float precision. Use this (never raw `uWavePhase`) for anything that should animate with Speed.
+- `ringWp()` / `rotWp()` — same wrapping idea, but each reads its own independent uniform (`uRingPhaseRaw` / `uSpokeRotRaw`) — completely decoupled from `wp()`/Fader 2.
+- `oscParam(base01, rate01, lo, hi, wobbleFrac)` — base+rate self-oscillation helper. `rate01 == 0` is always fully static.
+- `breathe(value, rate01)` — same idea, multiplicative, for uniforms already pre-scaled to their real range (`uWaveSize`, `uLineWidth`, `uBarWidth`).
+- `hLine()` / `gridLine()` / `neonFalloff()` — solid full-brightness line cores (no soft glow halo) so thin lines never look dim; width floored to ~1 screen pixel of AA.
 
 ## Ideas for what's left
 
-Still free: knob/fader 8 (`ch1ctrl48`), the two unidentified channels (`ch1ctrl31`,
-`ch1ctrl53`), and every button on the controller.
-
-- **Buttons -> direct mode select**: one button per mode (0-7) instead of sweeping knob 2 —
-  needs a small Switch/Logic CHOP to pick "last button pressed" since MIDI buttons aren't
-  naturally exclusive.
-- **Fader -> master brightness/exposure**: a new `uExposure` uniform multiplying final `col`.
-- **Fader -> glitch density**: currently hardcoded `0.03` in the final glitch-pixel line in
-  `main()` — expose it as a uniform.
-- **Fader -> mode 6/7 background darkness**: currently hardcoded `* 0.5` / `* 0.6` on the
-  `rainbowBG()`/dark-horizon calls.
+- **Buttons -> direct mode select**: one button per mode (0-7) instead of sweeping the mode knob — needs a small Switch/Logic CHOP to pick "last button pressed."
+- Two previously-seen unidentified channels, `ch1ctrl53`/`ch1ctrl54`, are still unbound.
+- Odyssey's Pulse/Glow could get live controls if you're willing to give up something else's control to free a position.
