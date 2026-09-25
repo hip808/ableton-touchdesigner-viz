@@ -1,4 +1,4 @@
-﻿// minimal_glitch.frag
+// minimal_glitch.frag
 // GLSL TOP pixel shader — Alva Noto / Ryoji Ikeda style raster-glitch field.
 // Driven entirely by uniforms bound to Ableton audio/tempo data (see ableton_viz_setup.py).
 //
@@ -62,6 +62,8 @@ uniform float uWaveSize;
 uniform float uWaveSizeRate;
 uniform float uLineWidth; // global thickness multiplier for all lines/edges. try 0.3-3.0, 1.0 = default
 uniform float uLineWidthRate;
+uniform float uWaveXScale; // horizontal magnify(>1)/shrink(<1) of the waveform traces (modes 0/1/2), 1.0 = default
+uniform float uWaveLineWidth; // dedicated stroke-width multiplier for the waveform traces only (modes 0/1/2), 0 = vanished, unbounded above -- independent of the shared uLineWidth (which also affects gridlines/Moire/Tron)
 
 // mode 5 (Tron equalizer) only:
 uniform float uBarWidth;    // 0..1, bar width: 0 = fully vanished, 1 = bars touch with no gap
@@ -107,6 +109,7 @@ float ringWp() { return mod(uRingPhaseRaw, 2000.0); }
 // clock). Middle of Knob 2 = stationary, left = counter-clockwise, right = clockwise.
 uniform float uSpokeRotRaw;
 float rotWp() { return mod(uSpokeRotRaw, 2000.0); }
+uniform float uSpokeRotRateRaw; // instantaneous spoke rotation rate (same units/sec as uSpokeRotRaw), motion-blur only
 
 // gain-scaled stroke intensity with a fast-attack/slow-release envelope (TD Lag CHOP,
 // separate rise/fall times) -- ramps up quickly on a hit but eases back down more
@@ -328,33 +331,48 @@ void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	addExtraLines(uv, bands, col);
 }
 
-// neon-style falloff: a hard bright core plus a soft glowing halo around it, both scaled
-// by the same width -- this is what makes every line in the piece read as a glowing tube
-// rather than a flat stroke (the Tron look), used by both gridLine and hLine below.
-float neonFalloff(float d, float width) {
-	float w = max(width * breathe(uLineWidth, uLineWidthRate), 0.0005);
-	// solid full-brightness line, no soft glow halo -- the core's own AA width is floored
-	// to roughly one screen pixel (fwidth(d)), so a sub-pixel-wide line still hits peak
-	// brightness at its center instead of dimming out from partial pixel coverage. The
-	// line's visual thinness now comes entirely from w shrinking the AA falloff distance,
-	// not from a translucent glow around it.
-	float aa = fwidth(d) * 0.8 + 1e-5;
-	float coreW = max(w, aa);
-	float core = smoothstep(coreW, 0.0, d);
-	return clamp(core, 0.0, 1.0);
+// unbounded version of breathe() (above, shared by everything else) used only for F8's
+// blur breathing -- the shared one clamps rate to 1.0, which caps how fast/deep it can ever
+// get. Knob 8 is meant to reach genuine strobing/flashing at high values, so this has no
+// ceiling: speed and depth both keep scaling with rate all the way to infinity.
+float breatheUnbounded(float value, float rate) {
+	float amt = max(rate, 0.0);
+	float wob = sin(wp() * amt * 3.0) * amt;
+	return value * (1.0 + wob * 0.3);
 }
 
-// thin monochrome grid line, width controlled by band energy. "width" is always
-// scaled by uLineWidth here, so every caller respects the global thickness knob.
+// F8 (uLineWidth) now controls ONLY a soft glow halo layered outside every line's hard core
+// -- never the core's own width. No growth until the raw value passes 10, then a slow ramp,
+// capped so it can never swallow the whole screen.
+float lineBlurWidth() {
+	float w = breatheUnbounded(uLineWidth, uLineWidthRate); // Knob 8: 0 = static, up = faster + deeper, unbounded
+	return clamp(max(w - 10.0, 0.0) * 0.001, 0.0, 0.5);
+}
+
+// hard-edged core (always sharp, full brightness across its width, AA'd to ~1 screen pixel)
+// plus an optional soft glow halo extending beyond it. coreWidth sets the sharp stroke's own
+// thickness and is never softened by blurWidth -- the two are fully independent controls.
+float neonFalloff(float d, float coreWidth, float blurWidth) {
+	float aa = fwidth(d) * 0.8 + 1e-5;
+	float halfCore = max(coreWidth, 0.0) * 0.5;
+	float core = smoothstep(halfCore + aa, halfCore - aa, d);
+	float glowOuter = halfCore + max(blurWidth, 0.0) + aa;
+	float glow = smoothstep(glowOuter, halfCore + aa, d) * 0.6;
+	return clamp(max(core, glow), 0.0, 1.0);
+}
+
+// thin monochrome grid line, width controlled by band energy. Core width is fixed per
+// caller; the F8 glow halo still layers on top globally.
 float gridLine(float coord, float cells, float width) {
 	float f = fract(coord * cells);
 	float d = min(f, 1.0 - f);
-	return neonFalloff(d, width);
+	return neonFalloff(d, width, lineBlurWidth());
 }
 
-// thin horizontal line at height y0, thickness "width" in uv units, scaled by uLineWidth
+// thin horizontal line at height y0, thickness "width" in uv units. Core width is fixed;
+// the F8 glow halo still layers on top globally.
 float hLine(float y, float y0, float width) {
-	return neonFalloff(abs(y - y0), width);
+	return neonFalloff(abs(y - y0), width, lineBlurWidth());
 }
 
 // renders the 8-bar field at a given rotation/translation, scaled by opacity -- called once
@@ -467,15 +485,46 @@ float waveformY(float x, float bands[8], float laneAmp, float phase, float speed
 	return y;
 }
 
+// analytic dy/dx of waveformY -- used to widen a trace's hit-test width just enough to
+// catch it every pixel in steep/fast regions, closing gaps. This no longer risks a blurry
+// look at any width: neonFalloff now renders a hard-edged solid stroke, not a gradient, so
+// widening the width only widens the solid interior -- it stays laser-sharp regardless.
+float waveformSlope(float x, float bands[8], float laneAmp, float phase, float speedMult) {
+	float dy = 0.0;
+	for (int i = 0; i < 8; i++) {
+		float freq = 3.0 + float(i) * 5.0;
+		float amp = bands[i] * laneAmp;
+		float w = freq * 6.2831;
+		dy += cos(x * w + phase + wp() * speedMult * (1.0 + float(i) * 0.3)) * amp * w;
+	}
+	return dy;
+}
+
+float waveformLine(float uvX, float uvY, float baseY, float bands[8], float laneAmp, float phase, float speedMult, float width, float dx) {
+	float xScale = max(uWaveXScale, 0.05);
+	float sx = (uvX - 0.5) / xScale + 0.5;
+	float sdx = dx / xScale;
+	float y = waveformY(sx, bands, laneAmp, phase, speedMult);
+	float slope = waveformSlope(sx, bands, laneAmp, phase, speedMult) / xScale; // dy/duvX, screen-space slope
+	float vertDist = abs(uvY - baseY - y);
+	float coreWidth = width * max(uWaveLineWidth, 0.0);
+	// small additive anti-gap term (not a divide-based projection -- that caused a steep
+	// slope to collapse the hit-test toward 0 for a whole column of pixels, painting a
+	// spurious vertical streak at every steep zero-crossing). This only ever widens the hit
+	// test by a bounded, screen-space amount, just enough to keep fast segments from
+	// dotting out between samples.
+	float gapFloor = min(abs(slope) * sdx * 1.5, sdx * 4.0);
+	float hitWidth = max(coreWidth, gapFloor);
+	return neonFalloff(vertDist, hitWidth, lineBlurWidth());
+}
+
 // mode 1: single oscilloscope trace, centered on the middle of the frame
 void sceneWaveform(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
-	float y = waveformY(uv.x, bands, 0.09 * breathe(uWaveSize, uWaveSizeRate), 0.0, 1.0);
-	float line = hLine(uv.y, 0.5 + y, 0.0025);
-	col += tint(fract(uTimeSec * 0.05)) * line;
+	float amp = 0.09 * breathe(uWaveSize, uWaveSizeRate);
+	float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, 0.0, 1.0, 0.0025, fwidth(uv.x));
+	col += tint(fract(uTimeSec * 0.05)) * line * 1.6;
 
 	col += vec3(0.15) * hLine(uv.y, 0.5, 0.0008);
-	float scan = gridLine(uv.y, 120.0, 0.05);
-	col += vec3(0.08) * scan;
 }
 
 // mode 1: many overlapping traces sharing one center line, each at a different
@@ -484,14 +533,15 @@ void sceneWaveform(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 void sceneMultiWave(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	const int TRACES = 14;
 	float size = breathe(uWaveSize, uWaveSizeRate);
+	float dx = fwidth(uv.x);
 	for (int j = 0; j < TRACES; j++) {
 		float fj = float(j);
 		float phase = fj * 1.7;
 		float laneAmp = (0.05 + 0.01 * fj) * size;
-		float y = waveformY(uv.x, bands, laneAmp, phase, 0.6 + 0.08 * fj);
-		float line = hLine(uv.y, 0.5 + y, 0.0016);
+		float speedMult = 0.6 + 0.08 * fj;
+		float line = waveformLine(uv.x, uv.y, 0.5, bands, laneAmp, phase, speedMult, 0.0016, dx);
 		float hue = fract(fj / float(TRACES) + wp() * 0.06);
-		col += tint(hue) * line * 0.85;
+		col += tint(hue) * line * 1.3;
 	}
 
 	col += vec3(0.1) * hLine(uv.y, 0.5, 0.0006);
@@ -538,7 +588,9 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float horizon = exp(-abs(uv.y - 0.5) * 3.0);
 	col = vec3(0.0, 0.015, 0.03) + vec3(0.0, 0.08, 0.14) * horizon;
 
-	float env = abs(waveformY(uv.x, bands, 0.4 * breathe(uWaveSize, uWaveSizeRate), 0.0, 0.5)) + 0.015;
+	float auroraXScale = max(uWaveXScale, 0.05);
+	float auroraSx = (uv.x - 0.5) / auroraXScale + 0.5;
+	float env = abs(waveformY(auroraSx, bands, 0.4 * breathe(uWaveSize, uWaveSizeRate), 0.0, 0.5)) + 0.015;
 	float top = 0.5 + env;
 	float bottom = 0.5 - env;
 
@@ -548,7 +600,7 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 
 	// glowing neon edge along the top and bottom of the silhouette
 	vec3 neon = tint(0.52); // cyan by default, shifts with uColorMix
-	float lw = breathe(uLineWidth, uLineWidthRate);
+	float lw = uLineWidth;
 	float glowTop = exp(-abs(uv.y - top) * 60.0 / max(lw, 0.05));
 	float glowBottom = exp(-abs(uv.y - bottom) * 60.0 / max(lw, 0.05));
 	col += neon * (glowTop + glowBottom) * 0.9;
@@ -556,12 +608,14 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	col += vec3(1.0) * hLine(uv.y, bottom, 0.0015);
 
 	const int TRACES = 4;
+	float dx = fwidth(uv.x);
 	for (int j = 0; j < TRACES; j++) {
 		float fj = float(j);
-		float y = waveformY(uv.x, bands, 0.12 * breathe(uWaveSize, uWaveSizeRate), fj * 1.7, 1.0);
-		float line = hLine(uv.y, 0.5 + y, 0.0018);
+		float amp = 0.12 * breathe(uWaveSize, uWaveSizeRate);
+		float phase = fj * 1.7;
+		float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, phase, 1.0, 0.0018, dx);
 		float hue = fract(fj / float(TRACES) + uTimeSec * 0.05);
-		col += tint(hue) * line;
+		col += tint(hue) * line * 1.4;
 	}
 }
 
@@ -617,7 +671,6 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 
 	// radial streaks fanning out from center, rotating via Knob 2 (see rotWp() above) --
 	// independent of Fader 2's travel speed and the ring's own rotation
-	float aWarp = a - rotWp();
 
 	// Density (Fader 7) used to directly rescale spoke count, which repositioned every
 	// spoke as it changed -- reading as the whole pattern spiraling. Instead: octave
@@ -631,15 +684,7 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float levelInt = floor(levelProgress);
 	float levelFrac = fract(levelProgress);
 	float segOld = 4.0 * pow(2.0, levelInt);
-
-	float cellOld = fract(aWarp * segOld / 6.2831853);
-	float distOld = abs(cellOld - 0.5);
-
-	// the "new" spokes are the same count as the old ones, just offset by exactly half a
-	// sector -- geometrically identical to the interleaved midpoints of a doubled grid
 	float halfSectorShift = 3.14159265 / segOld;
-	float cellNew = fract((aWarp + halfSectorShift) * segOld / 6.2831853);
-	float distNew = abs(cellNew - 0.5);
 
 	// solid flat-brightness core (so cranking thickness up genuinely fills the segment,
 	// all the way to spokes touching), with a soft blur only at the transition edge --
@@ -649,9 +694,31 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// wider than a thin spoke swallowed the whole thing, leaving no crisp core at all, so
 	// a slim spoke read as pure blur instead of a sharp laser-thin line.
 	float edgeSoft = clamp(thickness * 0.6, 0.0015, 0.08);
-	float spokeMaskOld = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distOld);
-	float spokeMaskNew = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distNew) * levelFrac;
-	float spokeMask = max(spokeMaskOld, spokeMaskNew);
+
+	// motion blur: sample the spoke mask at several angles spanning this frame's rotation
+	// and average them. A fast rotation caught at a single instant per frame aliases into
+	// an apparent reverse spin (the classic wagon-wheel effect) once the per-frame angular
+	// step passes half a spoke's angular spacing -- blurring across the frame's actual
+	// rotation reads as a smear/streak instead of a strobe, at any speed.
+	const int MB_SAMPLES = 6;
+	const float FRAME_DUR = 1.0 / 60.0; // assumed frame duration for the blur window
+	float spokeMask = 0.0;
+	for (int mb = 0; mb < MB_SAMPLES; mb++) {
+		float bt = (float(mb) / float(MB_SAMPLES - 1) - 0.5) * FRAME_DUR;
+		float aWarp = a - (rotWp() + uSpokeRotRateRaw * bt);
+
+		float cellOld = fract(aWarp * segOld / 6.2831853);
+		float distOld = abs(cellOld - 0.5);
+		// the "new" spokes are the same count as the old ones, just offset by exactly half a
+		// sector -- geometrically identical to the interleaved midpoints of a doubled grid
+		float cellNew = fract((aWarp + halfSectorShift) * segOld / 6.2831853);
+		float distNew = abs(cellNew - 0.5);
+
+		float spokeMaskOld = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distOld);
+		float spokeMaskNew = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distNew) * levelFrac;
+		spokeMask += max(spokeMaskOld, spokeMaskNew);
+	}
+	spokeMask /= float(MB_SAMPLES);
 
 	// traveling comet-like pulses flowing outward along each spoke -- driven directly by
 	// wp() (Fader 2's Speed/direction), nothing else layered on top
@@ -676,9 +743,15 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// identically in both modes
 	renderTravelingRing(p, bands, col);
 
-	// bright vanishing-point core at the very center
-	float core = exp(-r * 10.0 / max(pulse, 0.1));
-	col += vec3(1.0) * core * glow * 0.9;
+	// bright vanishing-point core at the very center -- grows up to 5x larger at full
+	// level/gain, on top of its own pulse animation. Uses uStrokeIntensity (the same
+	// already-lagged, Gain-scaled envelope driving the spoke brightness pop above) instead
+	// of raw gLevel() so the size change eases in/out smoothly (fast attack, slow release)
+	// rather than jumping instantly with every audio sample.
+	float coreSizeBoost = mix(1.0, 2.5, uStrokeIntensity);
+	float core = exp(-r * 10.0 / (max(pulse, 0.1) * coreSizeBoost));
+	vec3 coreColor = tint(hueBase); // same color system as the strokes -- white at uColorMix=0, hue-cycled at 1
+	col += coreColor * core * glow * 0.9;
 
 	// whole scene pulses brighter on the kick/low end (band0, ~60Hz) -- bands[] is already
 	// uGain-scaled and clamped, so Fader 1/Gain directly sets how strong this reaction is,
@@ -721,11 +794,6 @@ void main() {
 	} else {
 		sceneRasterBars(uv, res, pix, bands, col, false);
 	}
-
-	// --- sparse glitch pixels, density tied to overall level, layered on every mode ---
-	float n = hash(floor(pix / 3.0) + floor(uTimeSec * 24.0));
-	float glitch = step(0.995 - gLevel() * 0.03, n);
-	col += vec3(1.0) * glitch;
 
 	fragColor = TDOutputSwizzle(vec4(col, 1.0));
 }
