@@ -113,6 +113,28 @@ float rotWp() { return mod(uSpokeRotRaw, 2000.0); }
 // gradually, since a shader has no memory across frames to do this kind of envelope itself.
 uniform float uStrokeIntensity;
 
+// mode 3's scattered rings' own grow/shrink/dissolve clock -- independent of rotWp()
+// (spoke rotation stays untouched). Fader 2 alone controls both direction (in/out) and
+// speed, bipolar log curve, center = stop -- same pattern as Knob 5 does for the central
+// ring, just on Fader 2 here instead.
+uniform float uShapeGrowRaw;
+float shapeWp() { return mod(uShapeGrowRaw, 2000.0); }
+
+// Knob 6 rotates the scattered rings' arrangement around screen center -- independent
+// clock, bipolar log curve. Does NOT affect the central ring (that one stays put).
+uniform float uRingsOrbitRaw;
+float ringsOrbitWp() { return mod(uRingsOrbitRaw, 2000.0); }
+
+// Fader 7's diversity/spread value, pre-smoothed with a slow (2.5s) TD-side Lag CHOP so
+// changing it drifts the scattered rings organically to their new spread instead of
+// snapping instantly (a shader alone has no memory to do this kind of lag itself).
+uniform float uDiversitySmooth;
+
+// Fader 8 (free in this mode since the old scanline/crosshair background was removed)
+// scales ring/shape thickness from a thin line to effectively solid-filled ("infinity").
+// Scattered rings only -- the central ring stays as-is, same as Knob 6's rotation above.
+uniform float uRingsThicknessBase;
+
 out vec4 fragColor;
 
 // standard HSV -> RGB, h/s/v all 0..1
@@ -173,6 +195,35 @@ float gBand(float b) { return clamp(b * uGain, 0.0, 1.0); }
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+// the Odyssey ring, shared: a single pulse that travels center -> off-screen and loops,
+// dissolving into smoke by halfway through the trip. Always a perfect circle -- shape is
+// detached from gain/audio entirely (only brightness still pops with level). Used by
+// sceneTunnel/sceneMoire/sceneRasterBars so "the ring" behaves and is controlled
+// identically wherever it appears (same uTunRingAmount/uTunHueBase/uTunGlowBase, same
+// ringWp() clock driven by Knob 5 in Odyssey mode).
+void renderTravelingRing(vec2 p, float bands[8], inout vec3 col) {
+	float r = length(p) + 0.0001;
+
+	float hueBase = oscParam(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
+	float glow = oscParam(uTunGlowBase, uTunGlowRate, 0.4, 2.2, 0.3);
+	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
+	float level = gLevel();
+
+	float ringPhase = fract(ringWp());
+
+	float ringRadius = mix(0.0, 1.9, ringPhase);
+	float dissolveT = smoothstep(0.0, 0.5, ringPhase);
+	float ringW = mix(0.006, 0.3, dissolveT);
+	float distFromRing = abs(r - ringRadius);
+	float ringShape = exp(-(distFromRing * distFromRing) / (2.0 * ringW * ringW + 1e-5));
+	float ringOpacity = (1.0 - dissolveT) * ringVisible;
+	// extra brightness pop from the bass/kick band specifically (bands[0], already
+	// Gain-scaled), on top of the overall-level response, so low end hits punch harder
+	float bassBoost = bands[0] * 2.0;
+	float ringBrightness = ringShape * ringOpacity * (0.5 + 0.5 * level + bassBoost) * glow;
+	col += tint(fract(hueBase + 0.3)) * ringBrightness;
 }
 
 // mode 5: Tron-style LED equalizer -- 8 glowing vertical bars over a plain black
@@ -306,31 +357,94 @@ float hLine(float y, float y0, float width) {
 	return neonFalloff(abs(y - y0), width);
 }
 
+// renders the 8-bar field at a given rotation/translation, scaled by opacity -- called once
+// at the current transform and several more times at slightly earlier phase (see below) to
+// build a fading shadow-trail behind the moving bars, all in a single shader pass.
+// each of the 8 shapes is now a hollow ring, identical in style to the central ring,
+// scattered at random positions across the screen. It grows from nothing to far off-screen
+// and dissolves into a soft blur, looping. shapeWp() (combining Knob 2 for direction and
+// Fader 2 for speed, see uShapeGrowRaw above) drives it -- positive phase = growing outward,
+// negative = shrinking inward, exactly mirroring how Knob 5 drives the central ring.
+// Fader 7 (uDiversitySmooth, pre-lagged) controls diversity: how widely scattered the
+// random positions are, from clustered near center to spread across the whole frame --
+// smoothed so changing it drifts the rings there organically instead of snapping. Fader 5
+// (uTunRingAmount) gates all rings at once, this one included, same as the central ring.
+// Fader 8 (uRingsThicknessBase, pre-lagged) scales these rings' thickness -- solid, crisp
+// thin line at minimum (not vanished/blurred). Curve tuned so ~75% of the fader's travel
+// covers only the first 25% of the thickness adjustment (pow(0.75, 4.82) = 0.25), leaving
+// even more room for fine thin-line control, with the ramp to fully filled ("infinity")
+// concentrated in the last quarter of travel.
+void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, inout vec3 col) {
+	float diversity = clamp(uDiversitySmooth, 0.0, 1.0);
+	float spreadExtent = mix(0.05, 0.9, diversity);
+	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
+	// 0 = thin solid line, 1 = a width so large the ring reads as a solid filled disc
+	float thicknessNorm = pow(clamp(uRingsThicknessBase, 0.0, 1.0), 4.82);
+	float thicknessMult = mix(0.005, 80.0, thicknessNorm); // pushed down further so the AA floor (below) is what actually limits minimum thinness
+	// extra brightness pop that's strongest at the thin end and fades out as it fills in --
+	// a thin line reads as sharper/more laser-like when it's also brighter, not just smaller
+	float thinBrightBoost = mix(2.0, 1.0, thicknessNorm);
+
+	for (int i = 0; i < 8; i++) {
+		float fi = float(i);
+		float bandVal = bands[i];
+
+		// fixed-per-index pseudo-random position, scattered by the diversity-controlled
+		// spread, scaled by the same aspect factor already baked into pOrig
+		vec2 rnd = vec2(hash(vec2(fi, 11.3)), hash(vec2(fi, 37.7))) * 2.0 - 1.0;
+		vec2 homeCenter = vec2(rnd.x * spreadExtent * (res.x / res.y), rnd.y * spreadExtent);
+		// Knob 6 rotates the whole scattered arrangement around screen center -- the
+		// central ring (rendered separately) is never touched by this
+		float ringsRot = ringsOrbitWp();
+		homeCenter = vec2(
+			homeCenter.x * cos(ringsRot) - homeCenter.y * sin(ringsRot),
+			homeCenter.x * sin(ringsRot) + homeCenter.y * cos(ringsRot)
+		);
+		vec2 lpRaw = pOrig - homeCenter;
+		float r = length(lpRaw);
+
+		// per-shape phase offset so they don't all grow/dissolve in lockstep
+		float shapePhase = fract(shapeWp() + fi * 0.37);
+		float dissolveT = smoothstep(0.0, 0.5, shapePhase);
+
+		// grows from nothing (0) to far past the frame edge (1.9, same "infinity" range as
+		// the central ring), then dissolves/loops
+		float ringRadius = mix(0.0, 1.9, shapePhase);
+		float distFromRing = abs(r - ringRadius);
+		// floor ringW at roughly one screen pixel (fwidth-based, not a fixed epsilon) so the
+		// line can genuinely get pixel-thin instead of hitting an invisible minimum-blur
+		// floor that a fixed epsilon in the Gaussian denominator was silently imposing
+		float aaFloor = fwidth(distFromRing) * 0.6 + 1e-6;
+		float ringW = max(mix(0.006, 0.3, dissolveT) * thicknessMult, aaFloor);
+		float ringShape = exp(-(distFromRing * distFromRing) / (2.0 * ringW * ringW));
+		float shapeOpacity = 1.0 - dissolveT;
+
+		// extra brightness pop from the bass/kick band (bands[0], already Gain-scaled),
+		// applied to every shape regardless of which band it's individually keyed to, so
+		// low end hits make all of them punch together
+		float bassBoost = bands[0] * 2.0;
+		col += tint(fi / 8.0) * ringShape * shapeOpacity * ringVisible * (0.55 + 0.45 * bandVal + bassBoost) * thinBrightBoost * opacity;
+	}
+}
+
 void sceneRasterBars(vec2 uv, vec2 res, vec2 pix, float bands[8], inout vec3 col, bool showRing) {
-	// --- 8 vertical raster bars keyed to spectrum bands (Ikeda test-pattern feel) ---
-	float barW = 1.0 / 8.0;
-	int idx = int(floor(uv.x * 8.0));
-	float bandVal = bands[clamp(idx, 0, 7)];
-	float localX = fract(uv.x * 8.0);
+	vec2 pOrig = uv - 0.5;
+	pOrig.x *= res.x / res.y;
 
-	float barTop = 0.5 + bandVal * 0.45;
-	float barBottom = 0.5 - bandVal * 0.45;
-	float inBar = step(1.0 - barTop, uv.y) * step(uv.y, 1.0 - barBottom);
-	float edge = step(0.5 - barW * 0.5 + 0.002, localX) * step(localX, 0.5 + barW * 0.5 - 0.002);
-	col += tint(float(idx) / 8.0) * inBar * edge * (0.55 + 0.45 * bandVal);
+	// --- 8 shapes at fixed positions around a circle, each growing/shrinking and dissolving
+	// like the central ring (see renderBarFieldAtPhase). Detached from the background
+	// (scan/cross below stay on the untransformed uv, steady).
+	renderBarFieldAtPhase(pOrig, res, bands, 1.0, col);
 
-	float scan = gridLine(uv.y, mix(80.0, 260.0, gLevel()), 0.06);
-	col += vec3(0.12) * scan;
-
-	float cross = gridLine(uv.x, 1.0, 0.0015) + gridLine(uv.y, 1.0, 0.0015);
-	col += vec3(0.25) * cross;
+	// background left plain black -- the old scanline/crosshair grid (many closely-spaced
+	// thin lines) added up to a hazy gray wash rather than reading as a clean black canvas
+	// behind the rings/shapes
 
 	if (showRing) {
-		vec2 c = uv - 0.5;
-		c.x *= res.x / res.y;
-		float r = length(c);
-		float ring = smoothstep(0.02, 0.0, abs(r - uBeat * 1.4));
-		col += vec3(1.0) * ring;
+		// same shared Odyssey ring as sceneMoire/sceneTunnel -- grows from center to fully
+		// off-screen and loops, dissolving into smoke by halfway, with the identical
+		// inward/outward speed control (Knob 5, bipolar) and visibility (Fader 5)
+		renderTravelingRing(pOrig, bands, col);
 	}
 }
 
@@ -451,11 +565,24 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	}
 }
 
-void sceneMoire(vec2 uv, vec2 res, inout vec3 col) {
+void sceneMoire(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
+	vec2 pOrig = uv - 0.5;
+
+	// the whole background grid pattern moves left/right and rotates via the exact same
+	// controls as Odyssey's spokes -- Fader 2/wp() for translation, Knob 2/rotWp() for
+	// rotation -- applied as one rigid transform to the pattern before the internal
+	// relative-angle drift (below) that actually creates the moire fringes. The ring stays
+	// on pOrig, untransformed, same as Odyssey (Knob 2/Fader 2 never affect its ring either).
+	float overallRot = rotWp();
+	vec2 p = vec2(
+		pOrig.x * cos(overallRot) - pOrig.y * sin(overallRot),
+		pOrig.x * sin(overallRot) + pOrig.y * cos(overallRot)
+	);
+	p.x -= wp() * 0.1;
+
 	// two overlapping line grids at a slight relative rotation -> interference pattern.
 	// rotation speed and density respond to level/time for a slow generative drift.
 	float ang = uTimeSec * 0.05 + gLevel() * 0.4;
-	vec2 p = uv - 0.5;
 	vec2 p2 = vec2(p.x * cos(ang) - p.y * sin(ang), p.x * sin(ang) + p.y * cos(ang));
 
 	float density = mix(40.0, 90.0, gLevel());
@@ -464,8 +591,9 @@ void sceneMoire(vec2 uv, vec2 res, inout vec3 col) {
 	col += tint(uTimeSec * 0.03) * min(g1, g2) * 0.9; // bright where both grids overlap (moire fringes)
 	col += vec3(0.06) * max(g1, g2);            // faint where only one grid hits
 
-	float ring = smoothstep(0.02, 0.0, abs(length(p * vec2(res.x / res.y, 1.0)) - uBeat * 1.4));
-	col += vec3(1.0) * ring;
+	vec2 pRing = pOrig;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 // mode 7: 2001-style light-speed tunnel -- radiating streaks and pulse rings rushing outward
@@ -543,49 +671,10 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	vec3 streakColor = tint(hue); // respects uColorMix -- white at 0, full hue-cycled color at 1
 	col += streakColor * streakBright * glow;
 
-	// single ring that continuously travels from center to fully off-screen and loops, at a
-	// rate set by uTunRingSpeed (Knob 5) -- an ongoing animation now, not something that
-	// only appears/grows in response to the instantaneous level. uTunRingAmount is pure
-	// visibility: 0 fully vanishes and stops it outright. Gain/audio still shapes it: the
-	// radial waveform wobble and brightness pop both scale with gLevel(), so at uGain == 0
-	// it's a plain, dim, perfectly circular pulse -- still traveling, just undecorated.
-	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
-	float level = gLevel();
-
-	// travel phase: 0 at the center, 1 once it's reached full size, then wraps back to 0 to
-	// start the next pulse. Driven entirely by ringWp() -- its own independent, always-
-	// forward clock (see uRingPhaseRaw above) -- so it moves on its own regardless of
-	// Fader 2/Speed, never freezes, and never runs backward.
-	float ringPhase = fract(ringWp());
-
-	// radial waveform: the ring's own radius wobbles per-angle using the gain-scaled band
-	// array every other mode reads, via integer-harmonic sines of the angle so it's
-	// seamless all the way around (see the hue seam fix above for why sin(k*a) has no
-	// branch-cut jump). At uGain == 0 every band is 0, so waveDev is exactly 0.
-	// the waveform's angular drift uses ringWp() (the ring's own growth clock), not wp(),
-	// so its slow rotation stays proportional to the ring's own growth speed (Knob 5)
-	// rather than the unrelated global Speed (Fader 2)
-	float waveDev = 0.0;
-	for (int i = 0; i < 8; i++) {
-		float k = float(i + 1);
-		waveDev += sin(k * a + ringWp() * 0.6 + float(i) * 0.7) * bands[i];
-	}
-	waveDev *= 0.05;
-
-	// travels from the center (0) all the way past the frame edge (1.9) over one phase cycle
-	float ringRadius = mix(0.0, 1.9, ringPhase) + waveDev;
-	// dissolves into smoke starting immediately, fully dissolved by halfway through the
-	// travel (then stays dissolved for the rest of the journey before looping)
-	float dissolveT = smoothstep(0.0, 0.5, ringPhase);
-	float ringW = mix(0.006, 0.3, dissolveT);
-	float distFromRing = abs(r - ringRadius);
-	float ringShape = exp(-(distFromRing * distFromRing) / (2.0 * ringW * ringW + 1e-5));
-	// dissolves only after the solid stretch; also hides the loop's reset back to phase 0
-	float ringOpacity = (1.0 - dissolveT) * ringVisible;
-	// baseline brightness so it's still visible at uGain == 0 (just dimmer), with a pop as
-	// gain/audio rises
-	float ringBrightness = ringShape * ringOpacity * (0.5 + 0.5 * level) * glow;
-	col += tint(fract(hueBase + 0.3)) * ringBrightness;
+	// single ring that continuously travels from center to fully off-screen and loops --
+	// shared with sceneMoire via renderTravelingRing() so it behaves and is controlled
+	// identically in both modes
+	renderTravelingRing(p, bands, col);
 
 	// bright vanishing-point core at the very center
 	float core = exp(-r * 10.0 / max(pulse, 0.1));
@@ -626,7 +715,7 @@ void main() {
 	} else if (mode == 5) {
 		sceneTronEQ(uv, res, bands, col);
 	} else if (mode == 6) {
-		sceneMoire(uv, res, col);
+		sceneMoire(uv, res, bands, col);
 	} else if (mode == 7) {
 		sceneTunnel(uv, res, bands, col);
 	} else {

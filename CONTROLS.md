@@ -81,6 +81,8 @@ accumulation, never causes a retroactive jump. Four independent clocks exist:
 | **Ring growth / ringWp()** | `ring_rate` → `ring_phase_accum` | Knob 5 in Odyssey (bipolar, log curve) | `uRingPhaseRaw` — ring radius travel + its own slow rotation |
 | **Spoke rotation / rotWp()** | `spoke_rot_rate` → `spoke_rot_accum` | Knob 2 in Odyssey (bipolar, log curve) | `uSpokeRotRaw` — spoke pattern's angular offset |
 | **Stroke intensity envelope** | `stroke_level_calc` → `stroke_intensity_lag` | Gain × live level | `uStrokeIntensity` — fast-attack/slow-release brightness pop on the spokes |
+| **Scattered-ring growth (mode 3)** | `shape_grow_rate` → `shape_grow_accum` | Fader 2 in mode 3 (bipolar, log curve) | `uShapeGrowRaw` — each of the 8 scattered rings' own grow/shrink/dissolve cycle |
+| **Scattered-rings arrangement rotation (mode 3)** | `rings_orbit_rate` → `rings_orbit_accum` | Knob 6 in mode 3 (bipolar, log curve) | `uRingsOrbitRaw` — spins where the 8 random home positions sit |
 
 **Fader 2 / Speed** (`speed_curve`'s expression):
 ```python
@@ -125,6 +127,97 @@ fast on a hit, eases back down slowly for an organic feel, rather than snapping.
 ```
 Min fader = 1.5s lag (slow/drifting), max fader = 0s (instant/snappy); Knob 6 adds a
 breathing wobble on top, same zero-at-rest rule as everywhere else.
+
+### The shared ring — used in Odyssey, Moiré, and Raster Bars
+
+`renderTravelingRing()` is one function used by three modes (7, 6, 3) so "the ring" behaves
+identically everywhere it appears: same travel/dissolve math, same `uTunRingAmount`
+(Fader 5) visibility, same `uTunHueBase`/`uTunGlowBase` coloring, same `ringWp()` clock. Its
+shape is **always a perfect circle** — deliberately detached from gain/audio entirely (only
+brightness pops with level + a bass/kick boost from `bands[0]`, both already Gain-scaled).
+In modes 6 and 3 this shared ring is the one *central* ring; each of those modes additionally
+has its own extra content (Moiré's background grid, Raster Bars' 8 scattered rings — see
+below) that is NOT part of this shared function and has its own independent controls.
+
+### Mode 6 (Moiré) — background pattern movement
+
+The whole two-grid interference pattern (not the shared ring) translates and rotates via the
+same Fader 2/Knob 2 controls Odyssey's spokes use:
+```glsl
+float overallRot = rotWp();                 // Knob 2, bipolar log curve
+vec2 p = rotate(pOrig, overallRot);
+p.x -= wp() * 0.1;                          // Fader 2, bipolar log curve
+```
+This transform is applied once, before the existing internal relative-angle drift between
+the two grids (which still creates the actual moiré fringes, untouched). The shared ring
+(above) stays on the untransformed `pOrig` — Knob 2/Fader 2 never move it, matching how they
+don't move Odyssey's ring either.
+
+### Mode 3 (Raster Bars) — scattered dissolving rings
+
+The original vertical-bar EQ was replaced entirely. The old scanline/crosshair background
+was also removed (it added up to a hazy gray wash instead of clean black) — mode 3 is now:
+the shared central ring, plus **8 additional rings scattered at random screen positions**,
+each independently growing/shrinking and dissolving, plus per-shape audio brightness and a
+shared bass boost. Every position (1–8) means something different here than in other modes:
+
+| Pos | Control | Role in mode 3 |
+|---|---|---|
+| 1 (Fader) | Gain | Same global `uGain` as everywhere — also scales the bass-boost strength (see below) |
+| 2 (Fader) | Scattered-ring direction+speed | Bipolar, log curve, center=stop, ±40 max — replaces the old orbital-revolution use of Fader 2 in this mode. Fully independent of the shared ring and of Odyssey's Fader 2/Speed. |
+| 2 (Knob) | *(unused in this mode)* | — |
+| 5 (Fader) | Ring visibility | `uTunRingAmount` — gates **all** rings in this mode: the shared central one and all 8 scattered ones |
+| 6 (Knob) | Scattered-rings arrangement rotation | Bipolar log curve, independent clock — spins where the 8 random home positions sit, around screen center. Does **not** affect the shared central ring. |
+| 7 (Fader) | Diversity / spread | How widely scattered the 8 random positions are (clustered near center → spread across the full frame), pre-smoothed with a **2.5s lag** so changing it drifts the rings there organically instead of snapping |
+| 8 (Fader) | Scattered-ring thickness | Thin solid line → effectively solid-filled, pre-smoothed with the same 2.5s lag, log curve (power 4.82, tuned so ~75% of the fader's travel covers only the first 25% of the change — most of the range is fine thin-line control) |
+
+**Scattered rings' own independent clock** (`uShapeGrowRaw`/`shapeWp()`): Fader 2 alone
+controls both direction (in/out) and speed, bipolar log curve, center=stop, max ±40 —
+```python
+math.copysign(40.0 * abs((op('/ableton_viz/midi_lag')['ch1ctrl42'] - 63.5)/63.5) ** 2.5,
+              op('/ableton_viz/midi_lag')['ch1ctrl42'] - 63.5)
+```
+(`shape_grow_rate` → `shape_grow_accum`). Each of the 8 shapes uses `fract(shapeWp() + i*0.37)`
+so they cycle independently rather than in lockstep — grows from nothing to 1.9 (off-screen)
+and dissolves by halfway through its own cycle, identical math to the shared ring's dissolve.
+
+**Arrangement rotation** (`uRingsOrbitRaw`/`ringsOrbitWp()`, Knob 6):
+```python
+math.copysign(2.0 * abs((op('/ableton_viz/midi_lag')['ch1ctrl36'] - 63.5)/63.5) ** 2.5,
+              op('/ableton_viz/midi_lag')['ch1ctrl36'] - 63.5)
+```
+(`rings_orbit_rate` → `rings_orbit_accum`). Rotates each of the 8 random home positions
+around screen center as one rigid arrangement.
+
+**Diversity** (`uDiversitySmooth`, Fader 7, via `diversity_lag` — a dedicated 2.5s Lag CHOP
+reading `ch1ctrl47` directly, separate from `midi_lag`'s faster 0.4s):
+```glsl
+float spreadExtent = mix(0.05, 0.9, diversity);
+vec2 rnd = vec2(hash(vec2(i, 11.3)), hash(vec2(i, 37.7))) * 2.0 - 1.0;  // fixed per shape index
+vec2 homeCenter = vec2(rnd.x * spreadExtent * (res.x/res.y), rnd.y * spreadExtent);
+```
+
+**Thickness** (`uRingsThicknessBase`, Fader 8, via `thickness_lag` — same pattern, reading
+`ch1ctrl48`):
+```glsl
+float thicknessNorm = pow(clamp(uRingsThicknessBase, 0.0, 1.0), 4.82);
+float thicknessMult = mix(0.005, 80.0, thicknessNorm);
+float thinBrightBoost = mix(2.0, 1.0, thicknessNorm);  // thinner reads brighter/sharper
+float aaFloor = fwidth(distFromRing) * 0.6 + 1e-6;     // floors width at ~1 screen pixel
+float ringW = max(mix(0.006, 0.3, dissolveT) * thicknessMult, aaFloor);
+```
+The `aaFloor` line matters: an earlier version used a fixed `1e-5` epsilon in the Gaussian
+denominator as a divide-by-zero guard, which silently became a *minimum thickness floor* —
+shrinking `thicknessMult` further had no visible effect below a point. Replacing it with a
+proper `fwidth()`-based screen-pixel floor let the line actually get pixel-thin.
+
+**Bass boost, all rings in this mode** (central + all 8 scattered, plus Odyssey's spokes and
+ring too — same technique used in three places now):
+```glsl
+float bassBoost = bands[0] * 2.0;  // already Gain-scaled via gBand() in main()
+```
+Added into each ring/shape's brightness multiplier, so Fader 1/Gain directly controls how
+hard everything punches on the kick.
 
 ### Odyssey (mode 7) spoke density — octave doubling, not a simple rescale
 
@@ -187,10 +280,10 @@ from earlier iterations of the ring/spoke design.)
 | 0 | Waveform | Single oscilloscope trace, built from 8 summed sine waves (one per band). Color cycles slowly and continuously regardless of other knobs. |
 | 1 | Multi-wave | 14 overlapping traces sharing one center line — dense EEG/tangle look, each trace a different hue. |
 | 2 | Aurora | Near-black background with a big waveform silhouette rendered as a glowing neon edge outline (not a solid fill), plus 4 thin colored traces on top, all hue-shiftable via `uColorMix`. |
-| 3 | Raster bars (ring) | 8 hard-edged vertical bars (classic Ikeda test-pattern), scanlines, crosshair, plus a beat-synced expanding ring. |
+| 3 | Raster bars | Now a black background with the shared central ring plus 8 additional rings scattered at random positions, each independently growing/shrinking/dissolving. See "Mode 3" section below — almost every knob/fader means something unique here. |
 | 4 | Chromatic bars | 32 densely-packed rainbow bars with a soft glow halo, over a drifting rainbow-striped background. Hue spread across bars adjustable (position 6) from "all bars share one evolving hue" to full spread. |
 | 5 | Tron equalizer | 8 mirrored, glowing LED-style bars on plain black, growing outward from the vertical center, with a gentle per-band traveling wave riding on top. Solid full-brightness core (no dim-when-thin), soft blur only at the top/bottom tips. Subdivided into evenly-spaced lines (`uLineDensity`). |
-| 6 | Moiré | Two overlapping line grids at a slowly rotating relative angle, interference fringes. |
+| 6 | Moiré | Two overlapping line grids at a slowly rotating relative angle, interference fringes, plus the shared central ring. The whole grid pattern (not the ring) translates/rotates via Fader 2/Knob 2 — see "Mode 6" section below. |
 | 7 | Odyssey (Tunnel) | 2001-style light-speed tunnel: laser-thin radiating streaks (independently rotatable), a single traveling/dissolving ring (independently growable/shrinkable), a bright vanishing-point core, all kick-reactive. |
 | other | Fallback | Plain raster bars, no ring — same look as mode 3 minus the ring, used for any out-of-range `uMode` value. |
 
