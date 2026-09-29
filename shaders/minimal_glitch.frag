@@ -161,6 +161,18 @@ float oscParam(float base01, float rate01, float lo, float hi, float wobbleFrac)
 	return clamp(center + wob * range * 0.5, lo, hi);
 }
 
+// unbounded version of oscParam -- rate has no ceiling, so speed keeps climbing toward
+// genuine fast flashing/strobing between lo and hi instead of settling into a gentle
+// bounded wobble. The result itself still clamps to [lo,hi] since that's the parameter's
+// valid range (e.g. Color Mix and hue are 0..1) -- only the rate is unbounded.
+float oscParamUnbounded(float base01, float rate, float lo, float hi, float wobbleFrac) {
+	float center = mix(lo, hi, clamp(base01, 0.0, 1.0));
+	float amt = max(rate, 0.0);
+	float wob = sin(wp() * amt * 3.0) * amt;
+	float range = (hi - lo) * wobbleFrac;
+	return clamp(center + wob * range * 0.5, lo, hi);
+}
+
 // same zero-at-rate=0 self-oscillation idea as oscParam(), but multiplicative -- for
 // uniforms that are already pre-scaled to their real range (uWaveSize, uLineWidth,
 // uBarWidth) rather than a raw 0..1 fraction, so there's no separate [lo,hi] to remap into.
@@ -175,12 +187,17 @@ float breathe(float value, float rate01) {
 // noticeably dimmer/grayer than green at the same setting to the human eye, so partial
 // saturation made some colors in the cycle look washed out relative to others
 vec3 tint(float hue) {
-	float cm = oscParam(uColorMix, uColorMixRate, 0.0, 1.0, 1.0);
+	float cm = oscParamUnbounded(uColorMix, uColorMixRate, 0.0, 1.0, 1.0);
 	return mix(vec3(1.0), hsv2rgb(vec3(hue, 1.0, 1.0)), cm);
 }
 
 // uHueBase, self-oscillating via uHueBaseRate (replaces the old fixed uHueOscillate).
 float hueBase() { return oscParam(uHueBase, uHueBaseRate, 0.0, 1.0, 1.0); }
+
+// K3 picks which hue shows (0..1 around the color wheel); F3 controls how fast it then
+// drifts away from that choice, unbounded like the other "changing rate" controls -- at
+// F3 = 0 this sits exactly on K3's chosen hue with no auto-cycling.
+float colorHue() { return oscParamUnbounded(uColorMix, uColorMixRate, 0.0, 1.0, 1.0); }
 
 // full-screen drifting rainbow stripes, used as a background wash for the "rich/bright"
 // modes -- kept darker than the foreground line work so lines/bars still read clearly.
@@ -209,7 +226,7 @@ float hash(vec2 p) {
 void renderTravelingRing(vec2 p, float bands[8], inout vec3 col) {
 	float r = length(p) + 0.0001;
 
-	float hueBase = oscParam(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
+	float hueBase = oscParamUnbounded(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
 	float glow = oscParam(uTunGlowBase, uTunGlowRate, 0.4, 2.2, 0.3);
 	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
 	float level = gLevel();
@@ -522,7 +539,7 @@ float waveformLine(float uvX, float uvY, float baseY, float bands[8], float lane
 void sceneWaveform(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float amp = 0.09 * breathe(uWaveSize, uWaveSizeRate);
 	float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, 0.0, 1.0, 0.0025, fwidth(uv.x));
-	col += tint(fract(uTimeSec * 0.05)) * line * 1.6;
+	col += tint(colorHue()) * line * 1.6;
 
 	col += vec3(0.15) * hLine(uv.y, 0.5, 0.0008);
 }
@@ -614,7 +631,7 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float amp = 0.12 * breathe(uWaveSize, uWaveSizeRate);
 		float phase = fj * 1.7;
 		float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, phase, 1.0, 0.0018, dx);
-		float hue = fract(fj / float(TRACES) + uTimeSec * 0.05);
+		float hue = fract(fj / float(TRACES) + colorHue());
 		col += tint(hue) * line * 1.4;
 	}
 }
@@ -642,7 +659,7 @@ void sceneMoire(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float density = mix(40.0, 90.0, gLevel());
 	float g1 = gridLine(p.x, density, 0.08);
 	float g2 = gridLine(p2.x, density, 0.08);
-	col += tint(uTimeSec * 0.03) * min(g1, g2) * 0.9; // bright where both grids overlap (moire fringes)
+	col += tint(colorHue()) * min(g1, g2) * 0.9; // bright where both grids overlap (moire fringes)
 	col += vec3(0.06) * max(g1, g2);            // faint where only one grid hits
 
 	vec2 pRing = pOrig;
@@ -663,7 +680,7 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// local breathing speed layered on top. Spokes no longer rotate at all -- only the
 	// ring rotates now (see ringWp() below), so the spoke pattern itself stays angularly
 	// fixed regardless of Speed or anything else.
-	float hueBase = oscParam(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
+	float hueBase = oscParamUnbounded(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
 	float hueSpread = oscParam(uTunHueSpreadBase, uTunHueSpreadRate, 0.0, 1.0, 0.3);
 	float thickness = mix(0.01, 0.45, clamp(uTunThicknessBase, 0.0, 1.0));
 	float pulse = oscParam(uTunPulseBase, uTunPulseRate, 0.1, 1.0, 0.4);
@@ -695,6 +712,7 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// a slim spoke read as pure blur instead of a sharp laser-thin line.
 	float edgeSoft = clamp(thickness * 0.6, 0.0015, 0.08);
 
+	// spokes rotate via Knob 2 (rotWp(), shared with mode 6's pattern rotation clock).
 	// motion blur: sample the spoke mask at several angles spanning this frame's rotation
 	// and average them. A fast rotation caught at a single instant per frame aliases into
 	// an apparent reverse spin (the classic wagon-wheel effect) once the per-frame angular
@@ -721,8 +739,10 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	spokeMask /= float(MB_SAMPLES);
 
 	// traveling comet-like pulses flowing outward along each spoke -- driven directly by
-	// wp() (Fader 2's Speed/direction), nothing else layered on top
-	float flow = fract(r * 6.0 - wp());
+	// wp() (Fader 2's Speed/direction), nothing else layered on top. Sign flipped only here
+	// (mode 7) so F2's direction reads reversed in this mode specifically -- every other
+	// mode's use of wp() is untouched.
+	float flow = fract(r * 6.0 + wp());
 	float streakPulse = smoothstep(0.0, 0.18, flow) * smoothstep(0.4, 0.18, flow);
 
 	float radialFade = smoothstep(0.0, 0.06, r); // avoid a hard singularity right at center
