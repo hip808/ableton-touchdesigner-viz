@@ -68,6 +68,12 @@ uniform float uBlurPhaseRaw; // independent accumulator clock for uLineWidthRate
 float blurWp() { return mod(uBlurPhaseRaw, 2000.0); }
 uniform float uWaveXScale; // horizontal magnify(>1)/shrink(<1) of the waveform traces (modes 0/1/2), 1.0 = default
 uniform float uWaveLineWidth; // dedicated stroke-width multiplier for the waveform traces only (modes 0/1/2), 0 = vanished, unbounded above -- independent of the shared uLineWidth (which also affects gridlines/Moire/Tron)
+// Fader 6's breathing rate for Knob 6's thickness, shared by every mode that didn't already
+// have its own dedicated rate (modes 0/1/2/4/6/7 -- modes 3 and 5 keep their existing
+// separate rate uniforms). 0 = static at Knob 6's value, unbounded above.
+uniform float uThicknessRate;
+uniform float uThicknessRatePhaseRaw; // independent accumulator clock for uThicknessRate
+float thicknessRateWp() { return mod(uThicknessRatePhaseRaw, 2000.0); }
 
 // mode 5 (Tron equalizer) only:
 uniform float uBarWidth;    // 0..1, bar width: 0 = fully vanished, 1 = bars touch with no gap
@@ -587,7 +593,7 @@ float waveformLine(float uvX, float uvY, float baseY, float bands[8], float lane
 	float y = waveformY(sx, bands, laneAmp, phase, speedMult);
 	float slope = waveformSlope(sx, bands, laneAmp, phase, speedMult) / xScale; // dy/duvX, screen-space slope
 	float vertDist = abs(uvY - baseY - y);
-	float coreWidth = width * max(uWaveLineWidth, 0.0);
+	float coreWidth = width * max(breatheUnbounded(uWaveLineWidth, thicknessRateWp(), uThicknessRate), 0.0);
 	// small additive anti-gap term (not a divide-based projection -- that caused a steep
 	// slope to collapse the hit-test toward 0 for a whole column of pixels, painting a
 	// spurious vertical streak at every steep zero-crossing). This only ever widens the hit
@@ -763,7 +769,8 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// fixed regardless of Speed or anything else.
 	float hueBase = oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0);
 	float hueSpread = oscParam(uTunHueSpreadBase, uTunHueSpreadRate, 0.0, 1.0, 0.3);
-	float thickness = mix(0.01, 0.45, clamp(uTunThicknessBase, 0.0, 1.0));
+	// Fader 6 now gives this thickness a breathing rate too (previously plain/static)
+	float thickness = mix(0.01, 0.45, clamp(breatheUnbounded(uTunThicknessBase, thicknessRateWp(), uThicknessRate), 0.0, 1.0));
 	float pulse = oscParam(uTunPulseBase, uTunPulseRate, 0.1, 1.0, 0.4);
 	float glow = oscParam(uTunGlowBase, uTunGlowRate, 0.4, 2.2, 0.3);
 
