@@ -236,6 +236,11 @@ float hueBase() { return oscParamUnbounded(uHueBase, hueBaseWp(), uHueBaseRate, 
 // F3 = 0 this sits exactly on K3's chosen hue with no auto-cycling.
 float colorHue() { return oscParamUnbounded(uColorMix, colorWp(), uColorMixRate, 0.0, 1.0, 1.0); }
 
+// K4 (Tunnel Hue) / F4 -- same mechanism as colorHue() above, applied as an additional hue
+// offset in every mode so K4/F4 always has an effect no matter which mode is active,
+// layered on top of whatever each mode already does for color.
+float tunnelHue() { return oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0); }
+
 // full-screen drifting rainbow stripes, used as a background wash for the "rich/bright"
 // modes -- kept darker than the foreground line work so lines/bars still read clearly.
 vec3 rainbowBG(vec2 uv) {
@@ -317,7 +322,7 @@ void addExtraLines(vec2 uv, float bands[8], inout vec3 col) {
 	float edgeAA = fwidth(uv.y) * 1.5 + 0.0015;
 	float lit = smoothstep(top + edgeAA, top - edgeAA, uv.y) * smoothstep(bottom - edgeAA, bottom + edgeAA, uv.y);
 
-	vec3 lineColor = tint(fract(hueBase() + float(idx) / 8.0 * 0.4));
+	vec3 lineColor = tint(fract(hueBase() + tunnelHue() + float(idx) / 8.0 * 0.4));
 	// everything renders additively, so adding a matching color on top of an already-lit
 	// bar just brightens/washes that patch out instead of blending in. scale the
 	// contribution down wherever col is already bright, so lines recede into lit bars and
@@ -369,7 +374,7 @@ void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float litBottom = smoothstep(bottom - edgeAA, bottom + edgeAA, uv.y);
 	float lit = litTop * litBottom;
 
-	vec3 barColor = tint(fract(hueBase() + float(idx) / 8.0 * 0.4));
+	vec3 barColor = tint(fract(hueBase() + tunnelHue() + float(idx) / 8.0 * 0.4));
 	// solid full-brightness bar body -- unlike the old version, this never gets dimmed by
 	// the glow below, since the glow only adds brightness beyond the core, it doesn't
 	// replace or blend with it
@@ -593,7 +598,7 @@ float waveformLine(float uvX, float uvY, float baseY, float bands[8], float lane
 void sceneWaveform(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float amp = 0.09 * breathe(uWaveSize, uWaveSizeRate);
 	float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, 0.0, 1.0, 0.0025, fwidth(uv.x));
-	col += tint(colorHue()) * line * 1.6;
+	col += tint(fract(colorHue() + tunnelHue())) * line * 1.6;
 
 	col += vec3(0.15) * hLine(uv.y, 0.5, 0.0008);
 }
@@ -611,7 +616,7 @@ void sceneMultiWave(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float laneAmp = (0.05 + 0.01 * fj) * size;
 		float speedMult = 0.6 + 0.08 * fj;
 		float line = waveformLine(uv.x, uv.y, 0.5, bands, laneAmp, phase, speedMult, 0.0016, dx);
-		float hue = fract(fj / float(TRACES) + wp() * 0.06);
+		float hue = fract(fj / float(TRACES) + wp() * 0.06 + tunnelHue());
 		col += tint(hue) * line * 1.3;
 	}
 
@@ -640,7 +645,7 @@ void sceneChromaticBars(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		// blends each bar's hue from "all bars share one evolving hue" (spread=0) to "hue
 		// spread fully across bar position" (spread=1, the original always-on look)
 		float spread = oscParamUnbounded(uHueSpreadBase, hueSpreadWp(), uHueSpreadRate, 0.0, 1.0, 1.0);
-		float hue = fract(mix(uTimeSec * 0.02, cx + uTimeSec * 0.02, spread));
+		float hue = fract(mix(uTimeSec * 0.02, cx + uTimeSec * 0.02, spread) + tunnelHue());
 		vec3 c = hsv2rgb(vec3(hue, 0.9, 1.0));
 
 		float core = step(distX, barW * 0.35) * inBand;
@@ -685,7 +690,7 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float amp = 0.12 * breathe(uWaveSize, uWaveSizeRate);
 		float phase = fj * 1.7;
 		float line = waveformLine(uv.x, uv.y, 0.5, bands, amp, phase, 1.0, 0.0018, dx);
-		float hue = fract(fj / float(TRACES) + colorHue());
+		float hue = fract(fj / float(TRACES) + colorHue() + tunnelHue());
 		col += tint(hue) * line * 1.4;
 	}
 }
@@ -713,7 +718,7 @@ void sceneMoire(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float density = mix(40.0, 90.0, gLevel());
 	float g1 = gridLine(p.x, density, 0.08);
 	float g2 = gridLine(p2.x, density, 0.08);
-	col += tint(colorHue()) * min(g1, g2) * 0.9; // bright where both grids overlap (moire fringes)
+	col += tint(fract(colorHue() + tunnelHue())) * min(g1, g2) * 0.9; // bright where both grids overlap (moire fringes)
 	col += vec3(0.06) * max(g1, g2);            // faint where only one grid hits
 
 	vec2 pRing = pOrig;
