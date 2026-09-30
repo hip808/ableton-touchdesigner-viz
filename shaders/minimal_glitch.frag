@@ -57,26 +57,38 @@ uniform float uWavePhase; // accumulated animation clock from a TD Speed CHOP --
 float wp() { return mod(uWavePhase, 2000.0); }
 
 uniform float uColorMixRate;
+uniform float uColorPhaseRaw; // independent accumulator clock for uColorMixRate, NOT tied to wp()/Fader 2
+float colorWp() { return mod(uColorPhaseRaw, 2000.0); }
 
 uniform float uWaveSize;
 uniform float uWaveSizeRate;
 uniform float uLineWidth; // global thickness multiplier for all lines/edges. try 0.3-3.0, 1.0 = default
 uniform float uLineWidthRate;
+uniform float uBlurPhaseRaw; // independent accumulator clock for uLineWidthRate, NOT tied to wp()/Fader 2
+float blurWp() { return mod(uBlurPhaseRaw, 2000.0); }
 uniform float uWaveXScale; // horizontal magnify(>1)/shrink(<1) of the waveform traces (modes 0/1/2), 1.0 = default
 uniform float uWaveLineWidth; // dedicated stroke-width multiplier for the waveform traces only (modes 0/1/2), 0 = vanished, unbounded above -- independent of the shared uLineWidth (which also affects gridlines/Moire/Tron)
 
 // mode 5 (Tron equalizer) only:
 uniform float uBarWidth;    // 0..1, bar width: 0 = fully vanished, 1 = bars touch with no gap
 uniform float uBarWidthRate;
+uniform float uBarWidthPhaseRaw; // independent accumulator clock for uBarWidthRate
+float barWidthWp() { return mod(uBarWidthPhaseRaw, 2000.0); }
 uniform float uHueBase;     // base hue offset for the whole palette (bind to a fader for "color spectrum"), 0..1
 uniform float uHueBaseRate; // replaces the old uHueOscillate -- rate=0 means uHueBase sits static
+uniform float uHueBasePhaseRaw; // independent accumulator clock for uHueBaseRate
+float hueBaseWp() { return mod(uHueBasePhaseRaw, 2000.0); }
 uniform float uLineDensity; // 0..1, mode 5 only: how many evenly-spaced lines subdivide each bar (1 to 14)
 uniform float uLineDensityRate;
+uniform float uLineDensityPhaseRaw; // independent accumulator clock for uLineDensityRate
+float lineDensityWp() { return mod(uLineDensityPhaseRaw, 2000.0); }
 
 // mode 4 (chromatic bars) only: blends each bar's hue from "all bars share one evolving
 // hue" (0) to "hue spread fully across bar position" (1, the original always-on behavior)
 uniform float uHueSpreadBase;
 uniform float uHueSpreadRate;
+uniform float uHueSpreadPhaseRaw; // independent accumulator clock for uHueSpreadRate
+float hueSpreadWp() { return mod(uHueSpreadPhaseRaw, 2000.0); }
 
 // mode 8 (tunnel) only -- each parameter is a base value (0..1 raw knob/fader) plus its own
 // self-oscillation rate (0..1), combined by oscParam() below into a value that continuously
@@ -84,6 +96,8 @@ uniform float uHueSpreadRate;
 // to actual ranges.
 uniform float uTunHueBase;
 uniform float uTunHueRate;
+uniform float uTunHuePhaseRaw; // independent accumulator clock for uTunHueRate, NOT tied to wp()/Fader 2
+float tunnelHueWp() { return mod(uTunHuePhaseRaw, 2000.0); }
 uniform float uTunHueSpreadBase;
 uniform float uTunHueSpreadRate;
 uniform float uTunThicknessBase;
@@ -137,6 +151,13 @@ uniform float uDiversitySmooth;
 // scales ring/shape thickness from a thin line to effectively solid-filled ("infinity").
 // Scattered rings only -- the central ring stays as-is, same as Knob 6's rotation above.
 uniform float uRingsThicknessBase;
+// Fader 6 (mode 3 only): speed for the scattered rings' thickness cycling -- 0 = static at
+// Knob 6's value, unbounded above 0 (genuinely reaches very-fast cycling at max, not capped
+// like a bounded 0..1 rate would be). uRingsThicknessRate itself is this unbounded value,
+// used directly for depth (clamped to 1) and, via thickness_accum on the TD side, for speed.
+uniform float uRingsThicknessRate;
+uniform float uThicknessPhaseRaw; // independent accumulator clock for uRingsThicknessRate, NOT tied to wp()/Fader 2
+float thicknessWp() { return mod(uThicknessPhaseRaw, 2000.0); }
 // Knob 7 (mode 3 only): scales how far the scattered rings grow before dissolving.
 uniform float uRingsRadiusScale;
 
@@ -167,10 +188,13 @@ float oscParam(float base01, float rate01, float lo, float hi, float wobbleFrac)
 // genuine fast flashing/strobing between lo and hi instead of settling into a gentle
 // bounded wobble. The result itself still clamps to [lo,hi] since that's the parameter's
 // valid range (e.g. Color Mix and hue are 0..1) -- only the rate is unbounded.
-float oscParamUnbounded(float base01, float rate, float lo, float hi, float wobbleFrac) {
+// Takes an already-accumulated phase (from a dedicated independent clock, see colorWp()/
+// tunnelHueWp() below) instead of computing wp()*rate internally -- multiplying a large
+// ever-growing accumulator by a live-changing rate jumps the phase discontinuously every
+// time the rate changes, which read as flickering whenever the fader moved.
+float oscParamUnbounded(float base01, float phase, float depthAmt, float lo, float hi, float wobbleFrac) {
 	float center = mix(lo, hi, clamp(base01, 0.0, 1.0));
-	float amt = max(rate, 0.0);
-	float wob = sin(wp() * amt * 3.0) * amt;
+	float wob = sin(phase) * min(max(depthAmt, 0.0), 1.0);
 	float range = (hi - lo) * wobbleFrac;
 	return clamp(center + wob * range * 0.5, lo, hi);
 }
@@ -184,22 +208,33 @@ float breathe(float value, float rate01) {
 	return value * (1.0 + wob * 0.3);
 }
 
+// unbounded version of breathe() -- rate has no ceiling, for genuine fast flashing/
+// strobing. Takes an already-accumulated phase (dedicated independent clock) instead of
+// computing wp()*rate internally -- multiplying a large ever-growing accumulator by a
+// live-changing rate jumps the phase every time the rate changes, which reads as
+// flickering whenever the fader moved.
+float breatheUnbounded(float value, float phase, float rate) {
+	float amt = max(rate, 0.0);
+	float wob = sin(phase) * min(amt, 1.0);
+	return value * (1.0 + wob * 0.3);
+}
+
 // white when uColorMix is 0, shifts toward a hue-cycled color as it rises toward 1.
 // full saturation (was 0.85) -- blue/purple hues at less than full saturation read as
 // noticeably dimmer/grayer than green at the same setting to the human eye, so partial
 // saturation made some colors in the cycle look washed out relative to others
 vec3 tint(float hue) {
-	float cm = oscParamUnbounded(uColorMix, uColorMixRate, 0.0, 1.0, 1.0);
+	float cm = oscParamUnbounded(uColorMix, colorWp(), uColorMixRate, 0.0, 1.0, 1.0);
 	return mix(vec3(1.0), hsv2rgb(vec3(hue, 1.0, 1.0)), cm);
 }
 
 // uHueBase, self-oscillating via uHueBaseRate (replaces the old fixed uHueOscillate).
-float hueBase() { return oscParam(uHueBase, uHueBaseRate, 0.0, 1.0, 1.0); }
+float hueBase() { return oscParamUnbounded(uHueBase, hueBaseWp(), uHueBaseRate, 0.0, 1.0, 1.0); }
 
 // K3 picks which hue shows (0..1 around the color wheel); F3 controls how fast it then
 // drifts away from that choice, unbounded like the other "changing rate" controls -- at
 // F3 = 0 this sits exactly on K3's chosen hue with no auto-cycling.
-float colorHue() { return oscParamUnbounded(uColorMix, uColorMixRate, 0.0, 1.0, 1.0); }
+float colorHue() { return oscParamUnbounded(uColorMix, colorWp(), uColorMixRate, 0.0, 1.0, 1.0); }
 
 // full-screen drifting rainbow stripes, used as a background wash for the "rich/bright"
 // modes -- kept darker than the foreground line work so lines/bars still read clearly.
@@ -228,7 +263,7 @@ float hash(vec2 p) {
 void renderTravelingRing(vec2 p, float bands[8], inout vec3 col) {
 	float r = length(p) + 0.0001;
 
-	float hueBase = oscParamUnbounded(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
+	float hueBase = oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0);
 	float glow = oscParam(uTunGlowBase, uTunGlowRate, 0.4, 2.2, 0.3);
 	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
 	float level = gLevel();
@@ -263,10 +298,10 @@ void addExtraLines(vec2 uv, float bands[8], inout vec3 col) {
 	float localX = fract(colF);
 	float bandVal = bands[idx];
 
-	float N = floor(mix(1.0, 14.0, clamp(breathe(uLineDensity, uLineDensityRate), 0.0, 1.0)));
+	float N = floor(mix(1.0, 14.0, clamp(breatheUnbounded(uLineDensity, lineDensityWp(), uLineDensityRate), 0.0, 1.0)));
 	float cellPos = fract(localX * N);
 	float distToLine = abs(cellPos - 0.5) / N;
-	float w = mix(0.0008, 0.018, clamp(breathe(uBarWidth, uBarWidthRate), 0.0, 1.0));
+	float w = mix(0.0008, 0.018, clamp(breatheUnbounded(uBarWidth, barWidthWp(), uBarWidthRate), 0.0, 1.0));
 	// floor the AA falloff distance to roughly one screen pixel so a thin line's center still
 	// hits full brightness (same fix as neonFalloff) -- the old symmetric w+/-aa band let the
 	// AA ramp dominate once w shrank below aa, capping peak brightness well under 1.0
@@ -302,7 +337,7 @@ void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	float bandVal = bands[idx];
 	float localX = fract(mx * 8.0);
 
-	float halfGap = clamp((1.0 - breathe(uBarWidth, uBarWidthRate)) * 0.5, 0.0, 0.5); // 0.5 at uBarWidth=0 -> fully vanished
+	float halfGap = clamp((1.0 - breatheUnbounded(uBarWidth, barWidthWp(), uBarWidthRate)) * 0.5, 0.0, 0.5); // 0.5 at uBarWidth=0 -> fully vanished
 	float barHalfW = 0.5 - halfGap; // true intended half-width, 0 at uBarWidth=0
 	float distX = abs(localX - 0.5);
 	// soft (anti-aliased) left/right edges instead of a hard step -- a hard step reads as
@@ -353,18 +388,11 @@ void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 // unbounded version of breathe() (above, shared by everything else) used only for F8's
 // blur breathing -- the shared one clamps rate to 1.0, which caps how fast/deep it can ever
 // get. Knob 8 is meant to reach genuine strobing/flashing at high values, so this has no
-// ceiling: speed and depth both keep scaling with rate all the way to infinity.
-float breatheUnbounded(float value, float rate) {
-	float amt = max(rate, 0.0);
-	float wob = sin(wp() * amt * 3.0) * amt;
-	return value * (1.0 + wob * 0.3);
-}
-
 // F8 (uLineWidth) now controls ONLY a soft glow halo layered outside every line's hard core
 // -- never the core's own width. No growth until the raw value passes 10, then a slow ramp,
 // capped so it can never swallow the whole screen.
 float lineBlurWidth() {
-	float w = breatheUnbounded(uLineWidth, uLineWidthRate); // Knob 8: 0 = static, up = faster + deeper, unbounded
+	float w = breatheUnbounded(uLineWidth, blurWp(), uLineWidthRate); // Knob 8: 0 = static, up = faster + deeper, unbounded
 	return clamp(max(w - 10.0, 0.0) * 0.001, 0.0, 0.5);
 }
 
@@ -415,6 +443,10 @@ float hLine(float y, float y0, float width) {
 // that glow breathes), reusing the same global blur system as every other line in the
 // piece. Knob 7 (uRingsRadiusScale) scales how far these rings grow before dissolving.
 void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, inout vec3 col) {
+	// Knob 4 (Tunnel Hue) rotates these rings' color spread; Fader 4 controls how fast that
+	// rotation drifts -- same mechanism already driving the central ring's color, now shared
+	// with these scattered rings too instead of their old fixed per-ring rainbow offset.
+	float scatteredHueBase = oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0);
 	// Fader 7 (uDiversitySmooth) is now unbounded, 0 to infinity -- the old mix(0.05, 0.9,
 	// diversity) clamped to a 0..1 input, throwing away everything past the old max. This
 	// lets spread keep growing past the frame edge, scattering rings further and further
@@ -422,7 +454,15 @@ void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, 
 	float diversity = max(uDiversitySmooth, 0.0);
 	float spreadExtent = 0.05 + 0.85 * diversity;
 	// 0 = thin solid line, 1 = a width so large the ring reads as a solid filled disc
-	float thicknessNorm = pow(clamp(uRingsThicknessBase, 0.0, 1.0), 4.82);
+	// Fader 6's rate is independent of wp()/Fader 2's clock -- uses uTimeSec directly, which
+	// always advances regardless of Speed. At rate 0, thickness sits static at Knob 6's
+	// value; above 0, it cycles between 0 and Knob 6's value, both faster and deeper as the
+	// rate rises (same zero-at-rest convention as every other rate control).
+	float ringsThicknessDepth = clamp(uRingsThicknessRate, 0.0, 1.0);
+	float ringsThicknessPhase = fract(thicknessWp());
+	float ringsThicknessTriangle = 1.0 - abs(2.0 * ringsThicknessPhase - 1.0);
+	float ringsThicknessDynamic = uRingsThicknessBase * mix(1.0, ringsThicknessTriangle, ringsThicknessDepth);
+	float thicknessNorm = pow(clamp(ringsThicknessDynamic, 0.0, 1.0), 4.82);
 	float thicknessMult = mix(0.005, 80.0, thicknessNorm); // pushed down further so the AA floor (below) is what actually limits minimum thinness
 	// extra brightness pop that's strongest at the thin end and fades out as it fills in --
 	// a thin line reads as sharper/more laser-like when it's also brighter, not just smaller
@@ -472,7 +512,7 @@ void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, 
 		// applied to every shape regardless of which band it's individually keyed to, so
 		// low end hits make all of them punch together
 		float bassBoost = bands[0] * 2.0;
-		col += tint(fi / 8.0) * totalShape * shapeOpacity * (0.55 + 0.45 * bandVal + bassBoost) * thinBrightBoost * opacity;
+		col += tint(fract(fi / 8.0 + scatteredHueBase)) * totalShape * shapeOpacity * (0.55 + 0.45 * bandVal + bassBoost) * thinBrightBoost * opacity;
 	}
 }
 
@@ -599,7 +639,7 @@ void sceneChromaticBars(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 
 		// blends each bar's hue from "all bars share one evolving hue" (spread=0) to "hue
 		// spread fully across bar position" (spread=1, the original always-on look)
-		float spread = oscParam(uHueSpreadBase, uHueSpreadRate, 0.0, 1.0, 1.0);
+		float spread = oscParamUnbounded(uHueSpreadBase, hueSpreadWp(), uHueSpreadRate, 0.0, 1.0, 1.0);
 		float hue = fract(mix(uTimeSec * 0.02, cx + uTimeSec * 0.02, spread));
 		vec3 c = hsv2rgb(vec3(hue, 0.9, 1.0));
 
@@ -694,7 +734,7 @@ void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	// local breathing speed layered on top. Spokes no longer rotate at all -- only the
 	// ring rotates now (see ringWp() below), so the spoke pattern itself stays angularly
 	// fixed regardless of Speed or anything else.
-	float hueBase = oscParamUnbounded(uTunHueBase, uTunHueRate, 0.0, 1.0, 1.0);
+	float hueBase = oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0);
 	float hueSpread = oscParam(uTunHueSpreadBase, uTunHueSpreadRate, 0.0, 1.0, 0.3);
 	float thickness = mix(0.01, 0.45, clamp(uTunThicknessBase, 0.0, 1.0));
 	float pulse = oscParam(uTunPulseBase, uTunPulseRate, 0.1, 1.0, 0.4);

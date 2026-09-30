@@ -71,9 +71,15 @@ wired to a free control.
   stopped; one side = one direction, the other = the opposite. Speed (Fader 2) has a small
   dead-zone right at center (raw within ~8% of center snaps to exactly 0) so it reliably
   freezes instead of drifting from controller noise.
-- **"Changing" controls** (Color Mix rate, Tunnel Hue rate): at 0 the color/hue sits exactly
-  on the knob's chosen value with zero drift; above 0 it starts cycling away from that point,
-  faster as the fader rises, with no ceiling.
+- **"Changing"/breathing rate controls** (Color Mix rate, Tunnel Hue rate, rings-thickness
+  rate, blur breathing rate, Tron hue rate, hue-spread rate, bar-width rate, line-density
+  rate): at 0 the value sits exactly on the knob's chosen base with zero drift; above 0 it
+  starts cycling away from that point, faster as the fader rises, with no ceiling. All of
+  these now share the same log curve (exp 2.5) and the same jump-free mechanism: each has
+  its own dedicated accumulator clock, completely independent of Fader 2/Speed and of each
+  other, so moving one rate control never causes a sudden visual jump in that effect (the
+  old approach multiplied a large ever-growing clock by the live rate, which jumped the
+  phase every time the fader moved).
 
 ## Known quirks worth knowing
 
