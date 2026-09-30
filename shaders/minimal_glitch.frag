@@ -137,6 +137,8 @@ uniform float uDiversitySmooth;
 // scales ring/shape thickness from a thin line to effectively solid-filled ("infinity").
 // Scattered rings only -- the central ring stays as-is, same as Knob 6's rotation above.
 uniform float uRingsThicknessBase;
+// Knob 7 (mode 3 only): scales how far the scattered rings grow before dissolving.
+uniform float uRingsRadiusScale;
 
 out vec4 fragColor;
 
@@ -402,23 +404,31 @@ float hLine(float y, float y0, float width) {
 // negative = shrinking inward, exactly mirroring how Knob 5 drives the central ring.
 // Fader 7 (uDiversitySmooth, pre-lagged) controls diversity: how widely scattered the
 // random positions are, from clustered near center to spread across the whole frame --
-// smoothed so changing it drifts the rings there organically instead of snapping. Fader 5
-// (uTunRingAmount) gates all rings at once, this one included, same as the central ring.
-// Fader 8 (uRingsThicknessBase, pre-lagged) scales these rings' thickness -- solid, crisp
-// thin line at minimum (not vanished/blurred). Curve tuned so ~75% of the fader's travel
-// covers only the first 25% of the thickness adjustment (pow(0.75, 4.82) = 0.25), leaving
-// even more room for fine thin-line control, with the ramp to fully filled ("infinity")
-// concentrated in the last quarter of travel.
+// smoothed so changing it drifts the rings there organically instead of snapping. Knob 5
+// (Ring visibility) only gates the central/shared ring now -- these scattered rings are
+// always fully visible regardless of Knob 5. Fader 8 (uRingsThicknessBase, pre-lagged)
+// scales these rings' thickness -- solid, crisp thin line at minimum (not vanished/
+// blurred). Curve tuned so ~75% of the fader's travel covers only the first 25% of the
+// thickness adjustment (pow(0.75, 4.82) = 0.25), leaving even more room for fine thin-line
+// control, with the ramp to fully filled ("infinity") concentrated in the last quarter of
+// travel. Knob 8 adds a soft glow halo around each ring's edge (Fader 8 controls how fast
+// that glow breathes), reusing the same global blur system as every other line in the
+// piece. Knob 7 (uRingsRadiusScale) scales how far these rings grow before dissolving.
 void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, inout vec3 col) {
-	float diversity = clamp(uDiversitySmooth, 0.0, 1.0);
-	float spreadExtent = mix(0.05, 0.9, diversity);
-	float ringVisible = clamp(uTunRingAmount, 0.0, 1.0);
+	// Fader 7 (uDiversitySmooth) is now unbounded, 0 to infinity -- the old mix(0.05, 0.9,
+	// diversity) clamped to a 0..1 input, throwing away everything past the old max. This
+	// lets spread keep growing past the frame edge, scattering rings further and further
+	// off-screen (thinning out the visible pattern) with no ceiling.
+	float diversity = max(uDiversitySmooth, 0.0);
+	float spreadExtent = 0.05 + 0.85 * diversity;
 	// 0 = thin solid line, 1 = a width so large the ring reads as a solid filled disc
 	float thicknessNorm = pow(clamp(uRingsThicknessBase, 0.0, 1.0), 4.82);
 	float thicknessMult = mix(0.005, 80.0, thicknessNorm); // pushed down further so the AA floor (below) is what actually limits minimum thinness
 	// extra brightness pop that's strongest at the thin end and fades out as it fills in --
 	// a thin line reads as sharper/more laser-like when it's also brighter, not just smaller
 	float thinBrightBoost = mix(2.0, 1.0, thicknessNorm);
+	float ringBlurW = lineBlurWidth();
+	float radiusScale = max(uRingsRadiusScale, 0.05);
 
 	for (int i = 0; i < 8; i++) {
 		float fi = float(i);
@@ -442,9 +452,9 @@ void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, 
 		float shapePhase = fract(shapeWp() + fi * 0.37);
 		float dissolveT = smoothstep(0.0, 0.5, shapePhase);
 
-		// grows from nothing (0) to far past the frame edge (1.9, same "infinity" range as
-		// the central ring), then dissolves/loops
-		float ringRadius = mix(0.0, 1.9, shapePhase);
+		// grows from nothing (0) to far past the frame edge (1.9 * radiusScale, same
+		// "infinity" range as the central ring before Knob 7's scale), then dissolves/loops
+		float ringRadius = mix(0.0, 1.9 * radiusScale, shapePhase);
 		float distFromRing = abs(r - ringRadius);
 		// floor ringW at roughly one screen pixel (fwidth-based, not a fixed epsilon) so the
 		// line can genuinely get pixel-thin instead of hitting an invisible minimum-blur
@@ -452,13 +462,17 @@ void renderBarFieldAtPhase(vec2 pOrig, vec2 res, float bands[8], float opacity, 
 		float aaFloor = fwidth(distFromRing) * 0.6 + 1e-6;
 		float ringW = max(mix(0.006, 0.3, dissolveT) * thicknessMult, aaFloor);
 		float ringShape = exp(-(distFromRing * distFromRing) / (2.0 * ringW * ringW));
+		// soft glow halo beyond the core, same global blur system (Knob 8 amount / Fader 8
+		// breathing rate) used everywhere else in the piece
+		float ringGlow = smoothstep(ringW + ringBlurW, ringW, distFromRing) * 0.4;
+		float totalShape = max(ringShape, ringGlow);
 		float shapeOpacity = 1.0 - dissolveT;
 
 		// extra brightness pop from the bass/kick band (bands[0], already Gain-scaled),
 		// applied to every shape regardless of which band it's individually keyed to, so
 		// low end hits make all of them punch together
 		float bassBoost = bands[0] * 2.0;
-		col += tint(fi / 8.0) * ringShape * shapeOpacity * ringVisible * (0.55 + 0.45 * bandVal + bassBoost) * thinBrightBoost * opacity;
+		col += tint(fi / 8.0) * totalShape * shapeOpacity * (0.55 + 0.45 * bandVal + bassBoost) * thinBrightBoost * opacity;
 	}
 }
 
