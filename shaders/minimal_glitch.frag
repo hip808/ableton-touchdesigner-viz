@@ -388,6 +388,10 @@ void sceneTronEQ(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	col += barColor * inColumn * (tipGlowTop + tipGlowBottom) * 0.5;
 
 	addExtraLines(uv, bands, col);
+
+	vec2 pRing = uv - 0.5;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 // unbounded version of breathe() (above, shared by everything else) used only for F8's
@@ -601,6 +605,12 @@ void sceneWaveform(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	col += tint(fract(colorHue() + tunnelHue())) * line * 1.6;
 
 	col += vec3(0.15) * hLine(uv.y, 0.5, 0.0008);
+
+	// Knob 5 (visibility) / Fader 5 (speed) -- same shared ring as modes 3/6/7, now layered
+	// into every mode so K5/F5 always has an effect no matter which mode is active
+	vec2 pRing = uv - 0.5;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 // mode 1: many overlapping traces sharing one center line, each at a different
@@ -621,6 +631,10 @@ void sceneMultiWave(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	}
 
 	col += vec3(0.1) * hLine(uv.y, 0.5, 0.0006);
+
+	vec2 pRing = uv - 0.5;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 // mode 4: dense rainbow bar chart with a soft glow halo, over a drifting rainbow-stripe
@@ -654,6 +668,10 @@ void sceneChromaticBars(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float halo = smoothstep(barW * 2.5, 0.0, distX) * inBand;
 		col += c * halo * 0.35 * bandVal;
 	}
+
+	vec2 pRing = uv - 0.5;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 // mode 2: Tron-style -- near-black background, a big waveform silhouette rendered as a
@@ -693,6 +711,10 @@ void sceneAurora(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 		float hue = fract(fj / float(TRACES) + colorHue() + tunnelHue());
 		col += tint(hue) * line * 1.4;
 	}
+
+	vec2 pRing = uv - 0.5;
+	pRing.x *= res.x / res.y;
+	renderTravelingRing(pRing, bands, col);
 }
 
 void sceneMoire(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
