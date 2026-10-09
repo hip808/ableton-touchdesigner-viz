@@ -1,1 +1,5 @@
 .DS_Store
+
+# TouchDesigner's own numbered auto-backups (e.g. ableton-touchdesigner-viz.190.toe) --
+# duplicate snapshots of the main .toe, not part of project history we manage via git
+*.[0-9]*.toe
