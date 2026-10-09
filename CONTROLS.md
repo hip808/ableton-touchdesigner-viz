@@ -81,6 +81,29 @@ wired to a free control.
   old approach multiplied a large ever-growing clock by the live rate, which jumped the
   phase every time the fader moved).
 
+## F1 (Gain) vs F7 (Amplitude) — why both exist
+
+These look redundant (both "make the reactive visual bigger") but they act on two different
+stages of the pipeline and solve two different problems:
+
+- **F1/Gain is input-side sensitivity.** It rescales the *raw* incoming audio (band/level
+  values, often tiny — 0.01–0.1 from a real mix) up into a usable 0–1 range before anything
+  else touches it: `gLevel() = clamp(uLevel * uGain, 0, 1)`, `gBand(b) = clamp(b * uGain, 0, 1)`.
+  Same role in Mode 4's 3D mesh simulation (`height_script1`): gain scales each raw band value
+  before it's allowed to inject energy into the wave physics.
+- **F7/Amplitude is output-side visual scale.** It's applied *after* gain, to the
+  already-normalized, already-reactive result — it only controls how big the resulting shape
+  is drawn (`uWaveSize` in the 2D traces; `amplitude` multiplying final wave height in the 3D
+  mesh). It does not change how responsive the visual is to the music's dynamics, only how
+  large the already-responsive result appears.
+
+In practice: if F1 is too low, quiet passages barely move the visual at all, no matter how
+high F7 is. If F1 is too high, everything slams to the clamp ceiling and stops being
+dynamic — loud and quiet parts look identical, no matter how low F7 is. F7 never fixes an
+unresponsive signal; it only resizes whatever F1 already let through. Not redundant — they're
+answering "can it hear the music correctly" (F1) vs. "how big do I want to draw what it
+heard" (F7).
+
 ## Known quirks worth knowing
 
 - **Mode 7 spoke rotation has motion blur**: at high rotation speed, a single-instant sample
