@@ -104,6 +104,44 @@ unresponsive signal; it only resizes whatever F1 already let through. Not redund
 answering "can it hear the music correctly" (F1) vs. "how big do I want to draw what it
 heard" (F7).
 
+## K3 (Color Mix) vs K4 (Tunnel Hue) — why both exist
+
+Same question as F1/F7, different mechanism. These look redundant (both "shift the color")
+but K3 alone structurally cannot reach every color at full saturation — K4 is the one thing
+that fixes that, not a duplicate control.
+
+**Root cause:** in the 3D mesh's color formula (and in any 2D-mode usage that calls
+`tint(colorHue())` with its own hue argument), K3's single value is reused for two different
+jobs at once — it's both the hue-wheel position *and* the white↔color blend amount (`cm`).
+Concretely: `color = mix(white, hsv(hue, 1, 1), cm)`, and when `hue == cm == K3`, saturation
+ends up tied to *distance from red*. Verified numerically:
+
+| K3 position | Nominal hue | What you actually see |
+|---|---|---|
+| 0.33 | green | pale washed-out mint (only 33% saturated) |
+| 0.66 | blue | pale dusty lavender (only 66% saturated) |
+| 1.0 (wraps) | red | the *only* point reaching full, vivid saturation |
+
+So turning K3 alone sweeps the hue wheel, but only the red wraparound point ever looks truly
+vivid — every other hue is forced pastel in proportion to how far it sits from red.
+
+**Why K4 fixes it:** K4's tunnel-hue is *added* to the final hue used for display but is
+**not** part of the saturation calculation (`final_hue = cm + tunnel_hue`, saturation only
+ever depends on `cm`). So you can push K3 up near max (maxing out saturation, landing near
+red) and then use K4 to dial the displayed hue to anywhere else on the wheel — any hue, full
+saturation — something K3 alone cannot do.
+
+**Conclusion:** K3+K4 is a necessary pair, not a redundant one, as long as the "white at
+minimum" blend behavior (explicitly requested) stays tied to K3's own value. A redesign
+where K3 alone reaches full saturation at every hue is possible (split the single knob's
+travel into a fast white→saturated ramp over roughly the first 15%, then a full-wheel hue
+sweep at locked full saturation for the rest) but was intentionally **not implemented** —
+decided to keep K3+K4 as-is for now.
+
+**Mode 7 (Odyssey) exception:** K4/F4 also has a "native" structural role there (not just
+color) distinct from tunnel-hue's decorative use in every other mode — another reason not to
+collapse it away as "just" a color control.
+
 ## Known quirks worth knowing
 
 - **Mode 7 spoke rotation has motion blur**: at high rotation speed, a single-instant sample
