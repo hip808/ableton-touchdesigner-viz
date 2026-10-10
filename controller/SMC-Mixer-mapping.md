@@ -25,7 +25,7 @@ building its channel name. So physical **CC30** arrives in TD as **`ch1ctrl31`**
 | K2 | 31 | `ch1ctrl32` | continuous | Global: **Rotation** (modes 3/6/7). **Mode 4 (3D grid) override:** wobble/tumble complexity — 0 = clean single-axis spin, 1 = full axis-precession tumble |
 | K3 | 32 | `ch1ctrl33` | continuous, **raw/unlagged** (direct response, no smoothing) | **Color Mix** — hue-wheel position *and* white↔color saturation blend (`cm`); at 0 the mesh/trace is white, rising toward 1 sweeps the hue wheel at increasing saturation (full saturation only right at the wraparound). See `CONTROLS.md` for the K3/K4 saturation-coupling writeup |
 | K4 | 33 | `ch1ctrl34` | continuous, lagged (via `midi_lag`) | **Tunnel Hue** — additive hue offset, layered on top of K3 in every mode; the only way to get a fully-saturated non-red color, since it doesn't affect saturation. Has a structurally different **native (non-color) role in Mode 7** |
-| K5 | 34 | `ch1ctrl35` | continuous, lagged | Global: **Ring visibility**. **Mode 4 (3D grid) override:** mesh density, CW = denser, max raised to 120 cells |
+| K5 | 34 | `ch1ctrl35` | continuous, lagged | Global: **Ring visibility**. **Mode 4 (3D grid) override:** mesh density, 2×2 (CCW min) to 120×120 cells (CW max). Below ~8×8 the grid is too coarse to show real ripple structure (a hard geometric floor, 4 points can't encode a bump) and the mesh reads as swinging/tilting instead — not a tunable bug. Injection footprint and smoothing-pass count scale with density so the wave's own look/behavior stays constant regardless of where this sits; only mesh resolution changes |
 | K6 | 35 | `ch1ctrl36` | continuous, lagged | Global: **Thickness hub** (waveform/bar/ring line width). **Mode 4 override:** mesh line thickness, built via 8-directional pixel-dilation (max-composite), not a blur |
 | K7 | 36 | `ch1ctrl37` | continuous, lagged, unbounded | Global: **Waveform X-scale**. **Mode 4 override:** overall mesh scale (0→∞ curve) |
 | K8 | 37 | `ch1ctrl38` | continuous, lagged, unbounded | Global: **Blur/glow amount**. Size is **quantized to 20px steps** in Mode 4 to stop TD's Blur TOP from recompiling its kernel every frame (was causing severe slowdown at arbitrary float sizes) |
@@ -38,9 +38,9 @@ building its channel name. So physical **CC30** arrives in TD as **`ch1ctrl31`**
 | F2 | 41 | `ch1ctrl42` | continuous, bipolar, unbounded | Global: **Speed**. **Mode 4 override:** 3D spin speed (bipolar/center-stop, drives `rotx_rate`→`rotx_accum`, inertial via a 0.2s/0.3s lag) |
 | F3 | 42 | `ch1ctrl43` | continuous, unbounded log curve | **Color changing rate** — 0 = frozen on K3's pick, above 0 wobbles the hue away from it, own dedicated phase clock |
 | F4 | 43 | `ch1ctrl44` | continuous, unbounded log curve | **Tunnel Hue changing rate** — same mechanism as F3, own dedicated phase clock (`tunhue3d_accum` in Mode 4) |
-| F5 | 44 | `ch1ctrl45` | continuous, bipolar | Global: **Ring speed**. **Unused in Mode 4** since the K2/F2 rotation rebuild — freed up, nothing currently wired to it there |
+| F5 | 44 | `ch1ctrl45` | continuous, bipolar | Global: **Ring speed**. **Mode 4 (3D grid) override:** rainbow spread + scroll speed (`color_script1`/`color_to_sop1`) — at 0 the mesh stays a single uniform color (same hue as K3/K4), rising spreads that hue into a full rainbow gradient across the mesh *and* speeds up how fast it scrolls, both from the same raw value. 0 freezes the scroll (same zero-drift convention as the other rate controls) |
 | F6 | 45 | `ch1ctrl46` | continuous, unbounded log curve | Global: **Thickness breathing rate** |
-| F7 | 46 | `ch1ctrl47` | continuous, decoupled per mode | Global: **Amplitude** (0/1/2) / Spoke Density (7) / Diversity-spread (3) / line density (5). **Mode 4:** independent amplitude curve (`60·t^1.15`), final displacement **hard-clamped to ±25 world units** so no setting can push the mesh off-frame |
+| F7 | 46 | `ch1ctrl47` | continuous, decoupled per mode | Global: **Amplitude** (0/1/2) / Spoke Density (7) / Diversity-spread (3) / line density (5). **Mode 4:** independent amplitude curve (`60·t^1.15`) feeding a magnitude-based power-curve compressor on the final wave height (`COMPRESS_POWER` ranges 0.25 at F7 min to 0.5 at F7 max, pivoting at a reference magnitude of 10) — compresses tall peaks harder than gentle ripples, and stays compressed (not 1.0) even at F7 max so peaks never get "substantially" tall. No hard clamp — uncapped by explicit request, the compression curve is what keeps it in check instead |
 | F8 | 47 | `ch1ctrl48` | continuous, unbounded log curve | Global: **Blur breathing rate** — can reach real strobing |
 
 ## Buttons
@@ -52,7 +52,8 @@ building its channel name. So physical **CC30** arrives in TD as **`ch1ctrl31`**
 
 ## Known gaps / free controls
 
-- **F5 is currently unused in Mode 4** (freed up when rotation was rebuilt around K2+F2 only) — available for a future control if needed.
+- No fully free/unused continuous controls remain at the moment — F5 (last one) was wired to
+  Mode 4's rainbow spread/speed.
 - CC20–27 button *numbers* are physical CCs sent back out for LED control (`sendControl(1, 20+mode, ...)`) — don't reassign them to anything else without updating `mode_select_exec`.
 
 ---

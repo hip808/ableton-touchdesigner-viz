@@ -97,12 +97,48 @@ Symptom: edits mysteriously "revert." Close and reopen the file in your editor a
 external change (from TD itself, or from an AI assistant editing the file directly) before
 making further edits there.
 
+## TD's numbered auto-backups grow forever — prune them with an Execute DAT's `onProjectPostSave`
+
+TD writes a new `<project>.NNN.toe` into a `Backup/` folder on every save and never deletes
+old ones — no setting caps this, and it fails silently in the sense that nothing ever
+complains, the folder just quietly grows (hit 210+ files in this project before being
+noticed). An **Execute DAT** (not a special preference or global script) has built-in
+`onProjectPostSave()`/`onProjectPreSave()` callbacks that fire automatically per-project
+once its `active` and `projectpostsave` toggle parameters are on — no extra wiring needed.
+This project's `backup_pruner` (`/ableton_viz/backup_pruner`) uses that callback to keep
+only the newest 15 backups by their embedded number, deleting the rest after each save. One
+quirk: TD moves its most-recent root-level numbered backup into `Backup/` in a step that
+lands *after* `onProjectPostSave` fires, so the kept count settles at 16 in practice, not
+exactly 15 — harmless and stable, just worth knowing if the count looks off by one.
+
 ## Bluetooth MIDI devices need TD's own MIDI subsystem to "see" them first
 
 A MIDI In CHOP pointed at a Device ID with nothing registered there fails with "Could not
 open the MIDI interface" — even if the OS (Audio MIDI Setup) and other apps (Ableton Live)
 already see the device fine. Open **Dialogs -> MIDI Mapper** once (and use "Check MIDI
 Devices" if needed) to get TD to actually scan and populate `/local/midi/device`.
+
+## Script SOP points have no `.color`/`Cd` property — use a scriptCHOP + chopToSOP instead
+
+A Script SOP's `Point` object only exposes `P, x, y, z, index, normP, owner` — there is no
+`.color` member, despite `scriptOp.pointAttribs.create('Cd')` succeeding without error and
+returning a real `Attribute` object. That attribute's own API (`.vals()`, `arraySize`, etc.)
+turned out to be the newer POP-attribute interface ("Returns the attribute values as a list
+**for POPs**" — in its own help text), not something that writes back per-point SOP color
+through the Python object model used here. No error anywhere in this chain — `pt[attrib]`
+just raises `'td.Point' object is not subscriptable`, which looks like a syntax/API mistake
+rather than "this path doesn't do what you think."
+
+The working, well-trodden alternative: a **scriptCHOP** outputting `r`/`g`/`b` channels (one
+sample per point, same row-major order as any other per-point CHOP data in the network —
+see `height_script1`/`displace_script1`), fed into a **chopToSOP** with `chanscope = 'r g b'`
+and `attscope = 'Cd(0) Cd(1) Cd(2)'`, `mapping = 'onetoone'`. This mirrors the project's
+existing `soptoCHOP` (`mesh_base_chop1`) used for the reverse direction, and is the pattern
+this project now uses for the grid3d mesh's rainbow coloring (`color_script1` ->
+`color_to_sop1`). Point color on the destination MAT (`wireframeMAT` here) is picked up
+automatically once a `Cd` attribute exists on the geometry — no separate toggle needed, but
+the MAT's own constant color still multiplies against it, so set that constant to white if
+you want the per-point color to show through unmodified.
 
 ## `Connector.connect()` silently replaces without needing `.disconnect()` first
 

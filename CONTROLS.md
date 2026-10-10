@@ -142,6 +142,36 @@ decided to keep K3+K4 as-is for now.
 color) distinct from tunnel-hue's decorative use in every other mode — another reason not to
 collapse it away as "just" a color control.
 
+## Mode 4's 3D mesh — control overrides
+
+The 3D wireframe water-plane mesh (`grid3d`) has its own dedicated roles for several
+positions, layered on top of (or replacing) the general table above:
+
+- **Knob 2 / Fader 2 — rotation/tumble.** True axis-angle tumbling (`tumble_script1`): Knob 2
+  is wobble amount (how far the spin axis itself precesses off a clean single-axis spin),
+  Fader 2 drives spin speed via the shared `rotx_accum` clock. This is the *only* thing that
+  moves the mesh as a whole — density and the wave physics never do (see below).
+- **Knob 5 — mesh density**, not Ring visibility: live grid resolution from 2×2 up to
+  120×120 cells (`meshgrid1` cols/rows). Below ~8×8 the grid is too coarse to show real
+  ripple structure and the whole mesh reads as swinging/tilting rather than rippling — that's
+  a hard geometric floor (4 corner points can't encode localized bumps), not a tunable bug.
+  Wave footprint size (`INJECT_RADIUS`/`INJECT_SIGMA`) and smoothing passes scale with density
+  so the wave's look stays constant in world units regardless of where Knob 5 sits.
+- **Knob 3 (Color Mix) / Fader 3, Knob 4 (Tunnel Hue) / Fader 4 — unchanged**, still set the
+  mesh's base color exactly as in the general table.
+- **Fader 5 — rainbow spread + speed** (new, `color_script1`/`color_to_sop1`, replaces Ring
+  speed for this mesh only). At F5=0 the mesh is a single uniform color (identical to K3/K4's
+  base hue, so the look is unchanged from before this control existed). Turning F5 up spreads
+  that base hue out into a full rainbow gradient across the mesh (diagonal by grid row+col)
+  *and* speeds up how fast that gradient scrolls — both driven by the same raw fader value so
+  they scale together. F5=0 freezes the scroll, matching every other "changing rate" control's
+  zero-drift convention. Implemented as a per-point `Cd` color attribute (a `color_script1`
+  scriptCHOP feeding a `color_to_sop1` chopToSOP), with `wiremat1`'s own constant color set to
+  white so it passes the per-point color through unmodified. K3's white↔color blend (`cm`,
+  see "K3 vs K4" above) still applies to every point here too, not just the single base
+  color — K3 fades the whole rainbow toward white at K3=min, same as before this control
+  existed.
+
 ## Known quirks worth knowing
 
 - **Mode 7 spoke rotation has motion blur**: at high rotation speed, a single-instant sample
