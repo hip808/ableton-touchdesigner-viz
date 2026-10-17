@@ -11,9 +11,8 @@
 //   uTimeSec float  - elapsed seconds -> op('control')['level'] etc, or type absTime.seconds
 //   uMode    float  - which pattern to draw: 0=waveform, 1=multi-wave, 2=aurora,
 //                     3=raster bars (ring), 4=chromatic bars, 5=Tron equalizer
-//                     (glowing LED bars on black), 6=moire, 7=superstring (organic
-//                     growing cosmic logarithmic-spiral pattern). type 0-7.
-//                     (polar burst was removed.)
+//                     (glowing LED bars on black), 6=moire, 7=tunnel (2001-style
+//                     light-speed tunnel). type 0-7. (polar burst was removed.)
 //
 //   Most parameters now come in Base/Rate uniform pairs (e.g. uWaveSize/uWaveSizeRate):
 //   Base sets the value, Rate (0..1) sets how much and how fast it self-oscillates around
@@ -103,21 +102,19 @@ uniform float uHueSpreadRate;
 uniform float uHueSpreadPhaseRaw; // independent accumulator clock for uHueSpreadRate
 float hueSpreadWp() { return mod(uHueSpreadPhaseRaw, 2000.0); }
 
-// mode 7 (superstring) only -- each parameter is a base value (0..1 raw knob/fader) plus its
-// own self-oscillation rate (0..1), combined by oscParam() below into a value that continuously
+// mode 7 (tunnel) only -- each parameter is a base value (0..1 raw knob/fader) plus its own
+// self-oscillation rate (0..1), combined by oscParam() below into a value that continuously
 // wobbles around the base instead of sitting static. See oscParam() for how base/rate map
 // to actual ranges.
 uniform float uTunHueBase;
 uniform float uTunHueRate;
 uniform float uTunHuePhaseRaw; // independent accumulator clock for uTunHueRate, NOT tied to wp()/Fader 2
 float tunnelHueWp() { return mod(uTunHuePhaseRaw, 2000.0); }
-uniform float uTunHueSpreadBase; // no longer read by sceneSuperstring -- origins get their own hue offset instead
+uniform float uTunHueSpreadBase;
 uniform float uTunHueSpreadRate;
 uniform float uTunThicknessBase;
-// Fader 7, repurposed from the old tunnel's "spoke density" to superstring's Diversity:
-// how many of the 4 scattered origins are active, and how varied their growth/curl is.
 uniform float uTunDensityBase;
-uniform float uTunPulseBase; // no longer read by sceneSuperstring
+uniform float uTunPulseBase;
 uniform float uTunPulseRate;
 uniform float uTunGlowBase;
 uniform float uTunGlowRate;
@@ -731,285 +728,120 @@ void sceneMoire(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
 	renderTravelingRing(pRing, bands, col);
 }
 
-// mode 7: supersymmetry superstring cosmic pattern -- organic 3D growth from several
-// scattered origins spread across the whole frame, plus finer "dark matter" tendrils, each
-// strand a biased 3D random walk (DLA/Eden-growth-style organic spread, see NOTES.md) rather
-// than a clean analytic curve, so no two strands ever bend the same way twice. A strand's
-// geometry is a pure function of its seed and never wiggles/rotates/drifts on its own -- the
-// only things that move are explicitly knob-driven: Fader 2 is growth speed (zero/frozen at
-// center, like every other bipolar "speed" control in this project) and Knob 2 is the origin
-// cores' breathing pulse rate (also zero at center). This followed direct feedback that an
-// earlier version had several *uncontrolled* auto-animations running at once (continuous
-// diagonal tumble, flow drift, a wave ripple on every strand, a fast core pulse tied straight
-// to elapsed time) which read as restless rather than organic -- see NOTES.md. The fix wasn't
-// to remove motion entirely, it was to make every bit of motion explicitly controllable and
-// zero by default, same as everywhere else in this file.
-float ssHash(float n) { return fract(sin(n) * 43758.5453123); }
-vec3 ssHash3(float n) { return vec3(ssHash(n), ssHash(n + 37.1), ssHash(n + 71.9)) * 2.0 - 1.0; }
+// mode 7: 2001-style light-speed tunnel -- radiating streaks and pulse rings rushing outward
+// from a bright vanishing point at screen center, everything audio- and MIDI-reactive.
+void sceneTunnel(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
+	vec2 p = uv - 0.5;
+	p.x *= res.x / res.y;
+	float r = length(p) + 0.0001;
+	float a = atan(p.y, p.x);
 
-const int SS_NUM_ORIGINS = 6;
-const int SS_SEG = 12;
-const int SS_SEG_T = 6;
-
-// origins scattered across the ENTIRE visible frame (not clustered near center) -- idx 0
-// still anchors near center, the rest range from just off-center out past the screen edges,
-// so growth reads as spreading all over rather than confined to one corner.
-vec3 ssOriginPos3D(int idx, float radiusScale) {
-	float s = float(idx) * 23.71;
-	float ang = ssHash(s) * 6.2831853;
-	float dist = mix(0.1, 1.15, ssHash(s + 5.0)) * radiusScale;
-	float z = (ssHash(s + 9.0) - 0.5) * 0.5 * radiusScale;
-	return vec3(cos(ang) * dist, sin(ang) * dist, z);
-}
-
-// diversity (Fader 7) gates how many origins are active -- origin 0 always on, the rest
-// reveal progressively as diversity rises, each with its own random reveal threshold.
-float ssOriginActive(int idx, float diversity) {
-	if (idx == 0) return 1.0;
-	float thresh = ssHash(float(idx) * 13.1);
-	return smoothstep(thresh - 0.12, thresh + 0.12, diversity);
-}
-
-// weak-perspective projection, static camera -- camDist controls how much depth-based size
-// variation there is between near/far origins (no rotation or movement applied, ever).
-vec2 ssProject(vec3 p, float camDist) {
-	float scale = camDist / max(camDist + p.z, 0.3);
-	return p.xy * scale;
-}
-
-float ssCapsuleDist(vec2 p, vec2 a, vec2 b) {
-	vec2 pa = p - a, ba = b - a;
-	float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-	return length(pa - ba * h);
-}
-
-// explicit grow -> hold -> fade -> dormant phase, returning both how many segments are
-// revealed (growFrac) and overall visibility (separate from growFrac so a fully-grown,
-// currently-held strand reads as visible instead of accidentally zero -- see NOTES.md).
-// Durations are long and staggered by design: the pattern should read as essentially static
-// over any short viewing window, with slow growth as the only thing actually changing.
-void ssPhase(float t, float birthOffset, float growDur, float holdDur, float fadeDur, float dormantDur,
-	out float growFrac, out float visibility) {
-	float cycleDur = growDur + holdDur + fadeDur + dormantDur;
-	float age = mod(t + birthOffset, cycleDur);
-	growFrac = clamp(age / growDur, 0.0, 1.0);
-	float fadeStart = growDur + holdDur;
-	visibility = 1.0 - smoothstep(fadeStart, fadeStart + fadeDur, age);
-}
-
-void sceneSuperstring(vec2 uv, vec2 res, float bands[8], inout vec3 col) {
-	vec2 pScreen = uv - 0.5;
-	pScreen.x *= res.x / res.y;
-
-	// Knob 7 (otherwise idle in this mode) scales the overall spread/radius of the whole
-	// field. uWaveXScale is an unbounded 0.2->infinity curve meant for mesh/waveform scale
-	// elsewhere, so it's log-compressed here into a sane multiplier range.
-	float radiusScale = clamp(0.5 + 0.35 * log(1.0 + max(uWaveXScale, 0.0)), 0.5, 2.4);
-	// Fader 2 controls growth speed via its own existing bipolar accumulator (wp()) -- same
-	// safe pattern as every other "speed" control here (zero/frozen at center, direction +
-	// speed either side). Deliberately NOT uTimeSec * a live rate (see NOTES.md on why that
-	// causes a phase jump every time the fader moves) -- wp() is already a proper accumulated
-	// clock, safe to use directly as the time axis. Multiplier kept conservative (not the
-	// full unbounded log curve F2 normally gets) -- with ~50+ independently-staggered
-	// strands, letting growth timing run too fast makes many strands' segment-reveal/tip
-	// transitions overlap into visible flicker rather than legible growth.
-	float t = wp() * 0.12;
-	// Knob 2 controls the origin cores' breathing pulse via its own existing bipolar
-	// accumulator (rotWp(), the same clock other modes use for rotation) -- zero/frozen at
-	// center, so breathing is fully under the knob's control rather than always-on.
-	float breathPhase = rotWp();
-	float camDist = 2.2;
-
-	float diversity = clamp(uTunDensityBase, 0.0, 1.0); // Fader 7
-	float varMul = mix(0.6, 1.8, diversity);
-
+	// thickness/density are plain, non-oscillating values -- the spokes' own motion comes
+	// entirely from wp() (Fader 2's Speed, via the flow/streak pulse below), not from a
+	// local breathing speed layered on top. Spokes no longer rotate at all -- only the
+	// ring rotates now (see ringWp() below), so the spoke pattern itself stays angularly
+	// fixed regardless of Speed or anything else.
 	float hueBase = oscParamUnbounded(uTunHueBase, tunnelHueWp(), uTunHueRate, 0.0, 1.0, 1.0);
-	float thicknessMul = mix(0.5, 2.2, clamp(breatheUnbounded(uTunThicknessBase, thicknessRateWp(), uThicknessRate), 0.0, 1.0));
+	float hueSpread = oscParam(uTunHueSpreadBase, uTunHueSpreadRate, 0.0, 1.0, 0.3);
+	// Fader 6 now gives this thickness a breathing rate too (previously plain/static)
+	float thickness = mix(0.01, 0.45, clamp(breatheUnbounded(uTunThicknessBase, thicknessRateWp(), uThicknessRate), 0.0, 1.0));
+	float pulse = oscParam(uTunPulseBase, uTunPulseRate, 0.1, 1.0, 0.4);
 	float glow = oscParam(uTunGlowBase, uTunGlowRate, 0.4, 2.2, 0.3);
 
-	// --- main growing strands: 3D biased random walk ("Eden growth"/DLA-style organic
-	// spread) -- uneven step length + random turn at every node means no two strands bend the
-	// same way twice. Longer reach than before so growth visibly spans large portions of the
-	// screen instead of staying confined near a handful of close-together origins. ---
-	const int N = 20;
-	for (int i = 0; i < N; i++) {
-		float fi = float(i);
-		float seed = fi * 11.37;
+	// radial streaks fanning out from center, rotating via Knob 2 (see rotWp() above) --
+	// independent of Fader 2's travel speed and the ring's own rotation
 
-		int originIdx = int(mod(fi, float(SS_NUM_ORIGINS)));
-		float activeAmt = ssOriginActive(originIdx, diversity);
-		if (activeAmt < 0.01) continue;
-		vec3 origin = ssOriginPos3D(originIdx, radiusScale);
+	// Density (Fader 7) used to directly rescale spoke count, which repositioned every
+	// spoke as it changed -- reading as the whole pattern spiraling. Instead: octave
+	// doubling. Existing spokes never move; each doubling fades in a second, phase-shifted
+	// copy of the current spoke count sitting exactly at the midpoints between them, so new
+	// lines genuinely grow in between rather than the pattern rearranging itself. Log-curve
+	// (pow 2.5) on the fader for fine control at low density; base 4 spokes doubling up to
+	// 6 times maxes out at 256 -- fully filled in.
+	float densityCurved = pow(clamp(uTunDensityBase, 0.0, 1.0), 2.5);
+	float levelProgress = densityCurved * 6.0;
+	float levelInt = floor(levelProgress);
+	float levelFrac = fract(levelProgress);
+	float segOld = 4.0 * pow(2.0, levelInt);
+	float halfSectorShift = 3.14159265 / segOld;
 
-		// slow, long, staggered grow/hold/fade/dormant cycle -- individual strands take
-		// roughly 20-35s to fully grow, then hold fully visible for 1-2 minutes before a
-		// brief fade and rest, so the pattern reads as essentially static/stable over any
-		// short viewing window, with slow growth as the only thing actually changing.
-		float speedup = mix(1.0, 1.3, diversity);
-		float growDur = mix(20.0, 35.0, ssHash(seed + 4.0)) / speedup;
-		float holdDur = mix(60.0, 120.0, ssHash(seed + 7.0));
-		float fadeDur = 6.0;
-		float dormantDur = mix(15.0, 30.0, ssHash(seed + 10.0));
-		float birthOffset = ssHash(seed + 6.0) * (growDur + holdDur + fadeDur + dormantDur);
-		float growFrac, visibility;
-		ssPhase(t, birthOffset, growDur, holdDur, fadeDur, dormantDur, growFrac, visibility);
-		if (visibility < 0.01) continue;
+	// solid flat-brightness core (so cranking thickness up genuinely fills the segment,
+	// all the way to spokes touching), with a soft blur only at the transition edge --
+	// unlike a Gaussian falloff, the middle of the spoke doesn't dim, only the boundary
+	// blurs into the gap/neighboring spoke. edgeSoft scales with thickness (capped at the
+	// old fixed 0.08 for thick spokes) instead of staying a fixed width -- a fixed blur
+	// wider than a thin spoke swallowed the whole thing, leaving no crisp core at all, so
+	// a slim spoke read as pure blur instead of a sharp laser-thin line.
+	float edgeSoft = clamp(thickness * 0.6, 0.0015, 0.08);
 
-		// direction starts as a genuine random point on a sphere (true 3D growth, not just
-		// rotated-in-plane), then wanders via a random nudge at every step. Fixed shape --
-		// computed once from the seed, never animated/wiggled over time.
-		float az0 = ssHash(seed) * 6.2831853;
-		float el0 = ssHash(seed + 1.0) * 3.14159265 - 1.57079633;
-		vec3 dir = vec3(cos(el0) * cos(az0), sin(el0), cos(el0) * sin(az0));
-		float turnStrength = mix(0.25, 0.7, ssHash(seed + 2.0)) * varMul;
-		float segLenBase = (0.09 + 0.06 * ssHash(seed + 3.0)) * radiusScale; // long reach
+	// spokes rotate via Knob 2 (rotWp(), shared with mode 6's pattern rotation clock).
+	// motion blur: sample the spoke mask at several angles spanning this frame's rotation
+	// and average them. A fast rotation caught at a single instant per frame aliases into
+	// an apparent reverse spin (the classic wagon-wheel effect) once the per-frame angular
+	// step passes half a spoke's angular spacing -- blurring across the frame's actual
+	// rotation reads as a smear/streak instead of a strobe, at any speed.
+	const int MB_SAMPLES = 6;
+	const float FRAME_DUR = 1.0 / 60.0; // assumed frame duration for the blur window
+	float spokeMask = 0.0;
+	for (int mb = 0; mb < MB_SAMPLES; mb++) {
+		float bt = (float(mb) / float(MB_SAMPLES - 1) - 0.5) * FRAME_DUR;
+		float aWarp = a - (rotWp() + uSpokeRotRateRaw * bt);
 
-		vec3 chain[SS_SEG + 1];
-		chain[0] = origin;
-		for (int k = 0; k < SS_SEG; k++) {
-			float ks = seed + float(k) * 17.23;
-			vec3 turn = ssHash3(ks) * turnStrength;
-			dir = normalize(dir + turn);
-			float segLen = segLenBase * (0.5 + 1.0 * ssHash(ks + 5.0)); // uneven step length
-			chain[k + 1] = chain[k] + dir * segLen;
-		}
+		float cellOld = fract(aWarp * segOld / 6.2831853);
+		float distOld = abs(cellOld - 0.5);
+		// the "new" spokes are the same count as the old ones, just offset by exactly half a
+		// sector -- geometrically identical to the interleaved midpoints of a doubled grid
+		float cellNew = fract((aWarp + halfSectorShift) * segOld / 6.2831853);
+		float distNew = abs(cellNew - 0.5);
 
-		float thickness = mix(0.006, 0.014, 1.0 - growFrac * 0.4) * thicknessMul;
-		float revealSegs = growFrac * float(SS_SEG);
-		vec3 vineColor = tint(fract(hueBase + float(originIdx) * 0.14));
-		// uStrokeIntensity (not raw bands[]) -- an already-lagged, fast-attack/slow-release
-		// envelope, shared by every strand -- raw per-band values jitter every frame with the
-		// live spectrum and read as flicker at this strand count (~50+ simultaneously).
-		float audioBoost = 0.85 + 0.35 * uStrokeIntensity;
-
-		float glowAmt = 0.0;
-		vec3 tipPos2 = vec3(pScreen, 0.0);
-		bool tipFound = false;
-		for (int k = 0; k < SS_SEG; k++) {
-			float segReveal = clamp(revealSegs - float(k), 0.0, 1.0);
-			if (segReveal <= 0.0) continue;
-			// fade in from the shared origin -- N strands all starting at the same point
-			// would otherwise stack into a single blown-out blob right at the root
-			float rootFade = smoothstep(0.0, 2.0, float(k));
-			segReveal *= rootFade;
-			if (segReveal <= 0.0) continue;
-			vec2 a2 = ssProject(chain[k], camDist);
-			vec2 b2 = ssProject(chain[k + 1], camDist);
-			vec2 bInterp = mix(a2, b2, segReveal);
-			float d = ssCapsuleDist(pScreen, a2, bInterp);
-			float coreGlow = exp(-d / thickness * 4.5);
-			float haloGlow = exp(-d / (thickness * 3.0)) * 0.2;
-			glowAmt += (coreGlow + haloGlow) * segReveal;
-			if (segReveal < 1.0) { tipPos2 = vec3(bInterp, 0.0); tipFound = true; }
-		}
-
-		col += vineColor * glowAmt * visibility * activeAmt * audioBoost * glow * 0.85;
-
-		float tipGlow = tipFound ? exp(-length(pScreen - tipPos2.xy) * 70.0) * smoothstep(0.0, 0.2, growFrac) : 0.0;
-		col += vec3(1.0, 0.95, 0.8) * tipGlow * visibility * activeAmt * audioBoost * glow * 0.7;
+		float spokeMaskOld = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distOld);
+		float spokeMaskNew = smoothstep(thickness + edgeSoft, thickness - edgeSoft, distNew) * levelFrac;
+		spokeMask += max(spokeMaskOld, spokeMaskNew);
 	}
+	spokeMask /= float(MB_SAMPLES);
 
-	// --- dark matter cosmic-ray tendrils: same random-walk machinery, tighter/shorter, more
-	// of them, scaling in count with diversity, same slow grow/hold/fade/dormant cycle ---
-	int tendrilCount = int(mix(10.0, 36.0, diversity));
-	for (int r = 0; r < 36; r++) {
-		if (r >= tendrilCount) break;
-		float fr = float(r);
-		float seed = fr * 31.9 + 500.0;
-		int originIdx = int(mod(fr, float(SS_NUM_ORIGINS)));
-		float activeAmt = ssOriginActive(originIdx, diversity);
-		if (activeAmt < 0.01) continue;
-		vec3 origin = ssOriginPos3D(originIdx, radiusScale);
+	// traveling comet-like pulses flowing outward along each spoke -- driven directly by
+	// wp() (Fader 2's Speed/direction), nothing else layered on top. Sign flipped only here
+	// (mode 7) so F2's direction reads reversed in this mode specifically -- every other
+	// mode's use of wp() is untouched.
+	float flow = fract(r * 6.0 + wp());
+	float streakPulse = smoothstep(0.0, 0.18, flow) * smoothstep(0.4, 0.18, flow);
 
-		float speedup = mix(1.0, 1.3, diversity);
-		float growDur = mix(10.0, 18.0, ssHash(seed + 4.0)) / speedup;
-		float holdDur = mix(30.0, 60.0, ssHash(seed + 7.0));
-		float fadeDur = 4.0;
-		float dormantDur = mix(8.0, 15.0, ssHash(seed + 10.0));
-		float birthOffset = ssHash(seed + 6.0) * (growDur + holdDur + fadeDur + dormantDur);
-		float growFrac, visibility;
-		ssPhase(t, birthOffset, growDur, holdDur, fadeDur, dormantDur, growFrac, visibility);
-		if (visibility < 0.01) continue;
+	float radialFade = smoothstep(0.0, 0.06, r); // avoid a hard singularity right at center
+	// small floor (0.05, was 0.3) so strokes are barely visible at rest instead of already
+	// near-bright -- widens the swing between quiet and loud considerably
+	float streakBright = spokeMask * (0.25 + 0.75 * streakPulse) * radialFade * (0.05 + 0.95 * uStrokeIntensity);
 
-		float az0 = ssHash(seed) * 6.2831853;
-		float el0 = ssHash(seed + 1.0) * 3.14159265 - 1.57079633;
-		vec3 dir = vec3(cos(el0) * cos(az0), sin(el0), cos(el0) * sin(az0));
-		float turnStrength = mix(0.45, 1.0, ssHash(seed + 2.0)) * varMul;
-		float segLenBase = (0.06 + 0.045 * ssHash(seed + 3.0)) * radiusScale;
+	// hue driven by sin(a) rather than raw angle a -- atan2's principal value jumps by a
+	// full 2*pi right at the negative-x axis (9 o'clock), and scaling that raw jump by
+	// hueSpread (rarely exactly 1.0) left a visible color seam there. sin() is continuous
+	// straight through that branch cut, so there's no seam possible regardless of hueSpread.
+	float hue = fract(hueBase + (0.5 + 0.5 * sin(a)) * hueSpread + r * 0.15);
+	vec3 streakColor = tint(hue); // respects uColorMix -- white at 0, full hue-cycled color at 1
+	col += streakColor * streakBright * glow;
 
-		vec3 chain[SS_SEG_T + 1];
-		chain[0] = origin;
-		for (int k = 0; k < SS_SEG_T; k++) {
-			float ks = seed + float(k) * 17.23;
-			vec3 turn = ssHash3(ks) * turnStrength;
-			dir = normalize(dir + turn);
-			float segLen = segLenBase * (0.5 + 1.0 * ssHash(ks + 5.0));
-			chain[k + 1] = chain[k] + dir * segLen;
-		}
+	// single ring that continuously travels from center to fully off-screen and loops --
+	// shared with sceneMoire via renderTravelingRing() so it behaves and is controlled
+	// identically in both modes
+	renderTravelingRing(p, bands, col);
 
-		float thickness = mix(0.002, 0.005, 1.0 - growFrac * 0.4) * thicknessMul;
-		float revealSegs = growFrac * float(SS_SEG_T);
-		vec3 rayColor = tint(fract(hueBase + 0.55 + float(originIdx) * 0.14)); // violet-shifted "dark matter" tinge
-		float audioBoost = 0.85 + 0.35 * uStrokeIntensity; // same smoothed envelope as the main vines, see above
+	// bright vanishing-point core at the very center -- grows up to 5x larger at full
+	// level/gain, on top of its own pulse animation. Uses uStrokeIntensity (the same
+	// already-lagged, Gain-scaled envelope driving the spoke brightness pop above) instead
+	// of raw gLevel() so the size change eases in/out smoothly (fast attack, slow release)
+	// rather than jumping instantly with every audio sample.
+	float coreSizeBoost = mix(1.0, 2.5, uStrokeIntensity);
+	float core = exp(-r * 10.0 / (max(pulse, 0.1) * coreSizeBoost));
+	vec3 coreColor = tint(hueBase); // same color system as the strokes -- white at uColorMix=0, hue-cycled at 1
+	col += coreColor * core * glow * 0.9;
 
-		float glowAmt = 0.0;
-		for (int k = 0; k < SS_SEG_T; k++) {
-			float segReveal = clamp(revealSegs - float(k), 0.0, 1.0);
-			if (segReveal <= 0.0) continue;
-			float rootFade = smoothstep(0.0, 1.5, float(k));
-			segReveal *= rootFade;
-			if (segReveal <= 0.0) continue;
-			vec2 a2 = ssProject(chain[k], camDist);
-			vec2 b2 = ssProject(chain[k + 1], camDist);
-			vec2 bInterp = mix(a2, b2, segReveal);
-			float d = ssCapsuleDist(pScreen, a2, bInterp);
-			float coreGlow = exp(-d / thickness * 4.5);
-			float haloGlow = exp(-d / (thickness * 3.0)) * 0.2;
-			glowAmt += (coreGlow + haloGlow) * segReveal;
-		}
-
-		col += rayColor * glowAmt * visibility * activeAmt * audioBoost * glow * 0.5;
-
-		// bokeh dust sampled along the curled path itself, not a straight line
-		for (int dpt = 0; dpt < 3; dpt++) {
-			float fd = float(dpt);
-			float dseed = seed + fd * 7.0;
-			float dk = floor(ssHash(dseed) * revealSegs);
-			int dki = int(clamp(dk, 0.0, float(SS_SEG_T - 1)));
-			vec3 dustW = mix(chain[dki], chain[dki + 1], ssHash(dseed + 1.0));
-			vec2 dustPos = ssProject(dustW, camDist);
-			float dsize = (0.006 + 0.008 * ssHash(dseed + 2.0)) * radiusScale;
-			float dbright = ssHash(dseed + 3.0);
-			float pd = length(pScreen - dustPos);
-			col += rayColor * exp(-pd * pd / max(dsize * dsize, 1e-6)) * dbright * visibility * 0.6 * activeAmt;
-		}
-	}
-
-	// --- breathing cores at each active origin -- pulse rate is Knob 2's own accumulator
-	// (breathPhase), so it's zero/frozen at center and only breathes when explicitly dialed
-	// in, rather than the earlier always-on, uncontrolled uTimeSec-driven pulse ---
-	for (int o = 0; o < SS_NUM_ORIGINS; o++) {
-		float activeAmt = ssOriginActive(o, diversity);
-		if (activeAmt < 0.01) continue;
-		vec3 origin3 = ssOriginPos3D(o, radiusScale);
-		vec2 originProj = ssProject(origin3, camDist);
-		float depthBoost = clamp(camDist / max(camDist + origin3.z, 0.3), 0.4, 2.0); // brightness only, never the falloff radius
-		float dcore = length(pScreen - originProj);
-		float breathe = 0.6 + 0.3 * sin(breathPhase + float(o) * 2.1);
-		float core = exp(-dcore * 16.0 / radiusScale) * breathe;
-		col += tint(fract(hueBase + float(o) * 0.14)) * core * activeAmt * glow * depthBoost;
-	}
-
-	// single traveling ring, shared globally with modes 3/6 (Knob 5 / uTunRingAmount)
-	renderTravelingRing(pScreen, bands, col);
-
-	// whole scene pulses brighter with the same lagged envelope used above, instead of raw
-	// bands[0] -- the old tunnel's kickPulse read every kick hit directly from the bass band,
-	// which is exactly the kind of frame-to-frame jitter that reads as flicker at this strand
-	// count; uStrokeIntensity gives the same "reacts to the kick" feel with a smooth envelope.
-	float kickPulse = 1.0 + uStrokeIntensity * 0.8;
+	// whole scene pulses brighter on the kick/low end (band0, ~60Hz) -- bands[] is already
+	// uGain-scaled and clamped, so Fader 1/Gain directly sets how strong this reaction is,
+	// down to none at all when gain is low
+	float kickPulse = 1.0 + bands[0] * 2.0;
 	col *= kickPulse;
 }
+
 void main() {
 	vec2 uv = vUV.st; // TD provides vUV in [0,1] across the render target
 	vec2 res = uTDOutputInfo.res.zw; // output resolution
@@ -1022,7 +854,7 @@ void main() {
 	);
 
 	// uMode mapping: 0=waveform, 1=multi-wave, 2=aurora, 3=raster bars (with ring),
-	// 4=chromatic bars, 5=Tron equalizer, 6=moire, 7=superstring.
+	// 4=chromatic bars, 5=Tron equalizer, 6=moire, 7=tunnel.
 	// anything out of range falls back to plain raster bars (no ring).
 	int mode = int(uMode + 0.5);
 	if (mode == 0) {
@@ -1040,7 +872,7 @@ void main() {
 	} else if (mode == 6) {
 		sceneMoire(uv, res, bands, col);
 	} else if (mode == 7) {
-		sceneSuperstring(uv, res, bands, col);
+		sceneTunnel(uv, res, bands, col);
 	} else {
 		sceneRasterBars(uv, res, pix, bands, col, false);
 	}

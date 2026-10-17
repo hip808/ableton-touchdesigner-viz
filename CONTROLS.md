@@ -32,12 +32,12 @@ too natural a gesture to give up even though rotation is technically a rate).
 
 | Pos | Knob (magnitude) | Fader (rate) |
 |---|---|---|
-| 2 | **Rotation** *(exception)*: Mode 3 rings-orbit, Mode 6 pattern rotation. No effect in Mode 7 currently (a diagonal-rotation experiment was tried and removed, see "Mode 7: Superstring" below) | **Speed**: default in most modes; Mode 3 override = ring/shape growth rate. No effect in Mode 7 currently (a flow-drift experiment was tried and removed) |
+| 2 | **Rotation** *(exception)*: Mode 3 rings-orbit, Mode 6 pattern rotation, Mode 7 spoke rotation (motion-blurred, see below) | **Speed**: default in most modes; Mode 3 override = ring/shape growth rate |
 | 3 | **Color Mix** — picks the hue (sweeps the color wheel), lagged | **Color changing rate** — 0 = frozen on Knob 3's color, unbounded log curve above 0 |
-| 4 | **Tunnel Hue** value — layered as an additive hue offset in *every* mode (on top of whatever each mode already does for color: Color Mix in 0/1/2/6, index rainbow in 3, hue-spread in 4, Tron hue in 5, per-origin hue offset in 7), plus its original **Hue-spread** value role in Mode 4 specifically | **Tunnel Hue changing rate** — 0 = frozen, unbounded log curve, same "applies everywhere" scope as the value |
+| 4 | **Tunnel Hue** value — layered as an additive hue offset in *every* mode (on top of whatever each mode already does for color: Color Mix in 0/1/2/6, index rainbow in 3, hue-spread in 4, Tron hue in 5, native role in 7), plus its original **Hue-spread** value role in Mode 4 specifically | **Tunnel Hue changing rate** — 0 = frozen, unbounded log curve, same "applies everywhere" scope as the value |
 | 5 | **Ring visibility** — the shared traveling ring is now drawn as an overlay in *every* mode (0/1/2/3/4/5/6/7), lagged. The 8 scattered rings in Mode 3 are a separate thing and always fully visible regardless of Knob 5. Mode 5 also keeps Knob 5's original Tron hue breathing rate role — **reverted to plain linear** (`raw/127`, bounded 0..1), not the log/unbounded family | **Ring speed** — likewise now drives the shared ring's travel speed in every mode (bipolar, unbounded in mode 7's own use, bounded ±40 as the base mechanism elsewhere). Mode 5 also keeps Fader 5's original Tron hue value role |
-| 6 | **Thickness hub**: waveform line thickness (Modes 0/1/2, lagged), bar thickness (Mode 5), superstring vine/tendril thickness (Mode 7), ring thickness (Mode 3, lagged) — **plus the soft glow/blur halo around every line and both 3D meshes' line glow**, merged in here since they read as visually similar effects (previously Knob 8's job, see position 8 below). Waveform thickness's curve (Knob 6) is now **flat/linear through ~98% of the travel** (0 to 15), with unbounded divergence compressed into just the last handful of raw MIDI values at the very top — a true constant-slope linear curve can't become unbounded at a finite knob position, so this trades a barely-there acceleration right at the physical max for a linear feel everywhere else | Hue-spread rate (Mode 4) / bar-thickness rate (Mode 5) / ring-thickness rate (Mode 3) / **shared thickness-breathing rate** (also now drives the glow halo's breathing, same merge as above), unbounded log curve — waveform thickness (Modes 0/1/2, previously had no rate at all) and superstring thickness (Mode 7, previously static as tunnel thickness) now breathe too. *(Modes 4 and 6 were intentionally left with fixed/uncontrolled width — not part of this pass.)* |
-| 7 | **Waveform X-scale** (Modes 0/1/2, lagged, unbounded — horizontal magnify/shrink) / **ring radius scale** (Mode 3, lagged) / **superstring field radius** (Mode 7 — log-compressed into a 0.5–2.4 multiplier) / **bar spacing** (Mode 5, lagged — horizontal distance between the 8 main bars' centers, independent of their thickness) | **Amplitude** (Modes 0/1/2/4, lagged, unbounded) / **Diversity** (Mode 7 — how many of the 6 scattered origins are active, 0..1 raw) / Diversity-spread (Mode 3, lagged, unbounded) / **Knob 7's breathing rate** (Mode 5 — how fast the bar spacing drifts, unbounded log curve) |
+| 6 | **Thickness hub**: waveform line thickness (Modes 0/1/2, lagged), bar thickness (Mode 5), tunnel thickness (Mode 7), ring thickness (Mode 3, lagged) — **plus the soft glow/blur halo around every line and both 3D meshes' line glow**, merged in here since they read as visually similar effects (previously Knob 8's job, see position 8 below). Waveform thickness's curve (Knob 6) is now **flat/linear through ~98% of the travel** (0 to 15), with unbounded divergence compressed into just the last handful of raw MIDI values at the very top — a true constant-slope linear curve can't become unbounded at a finite knob position, so this trades a barely-there acceleration right at the physical max for a linear feel everywhere else | Hue-spread rate (Mode 4) / bar-thickness rate (Mode 5) / ring-thickness rate (Mode 3) / **shared thickness-breathing rate** (also now drives the glow halo's breathing, same merge as above), unbounded log curve — waveform thickness (Modes 0/1/2, previously had no rate at all) and tunnel thickness (Mode 7, previously static) now breathe too. *(Modes 4 and 6 were intentionally left with fixed/uncontrolled width — not part of this pass.)* |
+| 7 | **Waveform X-scale** (Modes 0/1/2, lagged, unbounded — horizontal magnify/shrink) / **ring radius scale** (Mode 3, lagged) / **bar spacing** (Mode 5, lagged — horizontal distance between the 8 main bars' centers, independent of their thickness) | **Amplitude** (Modes 0/1/2/4, lagged, unbounded) / Spoke Density (Mode 7, log curve) / Diversity-spread (Mode 3, lagged, unbounded) / **Knob 7's breathing rate** (Mode 5 — how fast the bar spacing drifts, unbounded log curve) |
 | 8 | **Optic flow shadow blur** — blur amount of the trailing echo copies (see "Optic flow shadow" below), 0 at CCW min (crisp echo) to strongly blurred at CW max | **Optic flow shadow movement** — direction + speed of the trail (see below), bipolar, center = stopped |
 
 ## Modes
@@ -51,7 +51,7 @@ too natural a gesture to give up even though rotation is technically a rate).
 | 4 | Chromatic Bars | Dense rainbow bar chart. **Overridden:** `mode_switch1` routes this index to the 3D `grid3d` wave mesh instead (see "Mode 4's 3D mesh" below) — this GLSL scene still exists but is never actually shown |
 | 5 | Tron EQ | Neon bar equalizer |
 | 6 | Unknown Pleasures | The real CP1919 pulsar dataset (actual Joy Division album data) rendered as a stacked ridgeline, 3D-rotatable, audio modulates overall intensity. **Overridden:** `mode_switch1` routes this index to the 3D `ridgeline` mesh (see "Mode 6's 3D mesh" below); the old Moiré GLSL scene this replaced still exists in the shader but is never shown |
-| 7 | Superstring | Organic 3D random-walk "vine" growth, spreading slowly across the whole screen from up to 6 scattered origins, plus finer "dark matter" tendrils and a shared traveling ring overlay. The only motion is the growth itself — static otherwise (see "Mode 7: Superstring" below) |
+| 7 | Odyssey | Tunnel/hyperspace: spokes, shared ring, center core |
 
 ## Response lag
 
@@ -137,6 +137,10 @@ where K3 alone reaches full saturation at every hue is possible (split the singl
 travel into a fast white→saturated ramp over roughly the first 15%, then a full-wheel hue
 sweep at locked full saturation for the rest) but was intentionally **not implemented** —
 decided to keep K3+K4 as-is for now.
+
+**Mode 7 (Odyssey) exception:** K4/F4 also has a "native" structural role there (not just
+color) distinct from tunnel-hue's decorative use in every other mode — another reason not to
+collapse it away as "just" a color control.
 
 ## Mode 4's 3D mesh — control overrides
 
@@ -234,67 +238,6 @@ pulsar row so the extra geometry overlaps invisibly and it still reads as one li
 - **Knob 6/Fader 6, Knob 8/Fader 8 — same mechanisms as Mode 4** (thickness pixel-dilation,
   quantized blur).
 
-## Mode 7: Superstring — control overrides
-
-Replaced the old "Odyssey" 2001-style tunnel entirely (`sceneSuperstring()` in
-`minimal_glitch.frag`, was `sceneTunnel()`). Went through four iterations based on direct
-feedback, each documented in NOTES.md:
-
-1. A clean analytic logarithmic spiral — read as too static/mechanical, every strand bent the
-   exact same predictable way.
-2. A biased 3D random walk per strand instead (DLA/Eden-growth-style, like bacterial/coral
-   colony spread) — better bending, but growth was tied to Fader 2's speed ("too fast, not
-   really growing"), the halo was too soft ("too blur"), and audio reactivity was too strong.
-3. Kept the random-walk strands, decoupled growth from any knob (plain elapsed time), tightened
-   the halo, gentled audio reactivity — but *added* a continuous diagonal 3D tumble (Knob 2), a
-   bidirectional flow drift (Fader 2), a traveling wave ripple along every strand, and a fast
-   sinusoidal pulse on each origin core. Net result: "don't like it... too much and too fast."
-4. **Current version**: stripped all of that back out. **The only motion in this scene is slow
-   growth** — no auto-rotation, no drift, no per-frame shape wiggle, no fast-breathing cores. A
-   strand's geometry is a pure function of its random seed, fixed forever once computed; only
-   how much of it is revealed changes, slowly, over roughly a minute or two per strand. Origins
-   are also now spread across the *entire* visible frame (not clustered within half a screen's
-   radius of center) with much longer per-strand reach, so growth genuinely spans the whole
-   screen instead of staying confined to one corner. Knobs 2 and 7 no longer have a mode-7 role
-   (the diagonal-rotate and flow experiments from iteration 3 are gone); Fader 2 is back to its
-   global Speed role, with no Mode 7-specific effect right now.
-
-**Two real bugs worth knowing if this gets extended further, both the same shape:** a
-"did we find X this frame" value defaulting to something indistinguishable from legitimate
-data. (1) A `tipGlow` term defaulted its "tip position" to the current pixel's own screen
-position when no segment was partially grown that frame (true for a long stretch once a strand
-finishes growing) — distance-to-self is `0`, so `exp(0) = 1.0`, the single brightest value the
-term could produce, and it leaked into the sum for every pixel. (2) The origin-core glow's
-falloff radius was divided by a per-origin `depthBoost` term meant only to brighten near-camera
-origins — at high values that denominator grew instead of shrinking, which slowed the falloff
-rate, blowing the core out into a soft radius covering much of the screen. Both fixed the same
-way: never let a fallback/derived value be numerically indistinguishable from a legitimate
-result — use an explicit `bool found` flag for (1), and keep depth out of a falloff radius
-entirely, using it only as a brightness multiplier, for (2).
-
-- **Knob 2, Knob 7 — no mode-7 role currently**: the diagonal-rotation and flow-radius
-  experiments from iteration 3 were removed along with the rest of the auto-motion. Available
-  for a future control if wanted.
-- **Knob 3 (Color Mix) / Fader 3, Knob 4 (Tunnel Hue) / Fader 4** — same base-hue + white-blend
-  mechanism as every other mode; each origin gets its own small additive hue offset so the
-  field reads as warm/cool-varied rather than one flat color, and the dark-matter tendrils get
-  an extra violet-leaning shift.
-- **Knob 6/Fader 6 — Thickness hub**: scales both vine and tendril thickness, breathing via
-  Fader 6 same as elsewhere.
-- **Fader 7 — Diversity** (was "Spoke Density" in the old tunnel): raw 0..1 value gates how
-  many of the 6 origins are active (each of the 5 non-center origins has its own random reveal
-  threshold it crosses as Diversity rises), widens per-string parameter variance, modestly
-  speeds up growth, and scales the tendril count from 10 up to 36.
-- **Knob 5/Fader 5 — Ring visibility/speed**: the shared traveling ring (see "Odyssey ring"
-  elsewhere) still overlays this mode identically to Modes 3/6.
-- **Audio-reactivity, intentionally subtle by request**: each vine/tendril is keyed to one of
-  the 8 frequency bands for a gentle brightness nudge only (`0.85 + 0.4*band`) — never growth
-  timing, to avoid the live-rate phase-jump bug documented in NOTES.md — and the whole scene
-  pulses brighter on the kick/bass band, same convention as the old tunnel's `kickPulse`. No
-  shape wiggle or wave ripple of any kind as of this version.
-- **Knob 8/Fader 8 — Optic flow shadow**: same global post-effect as every mode, no
-  mode-specific work needed.
-
 ## Optic flow shadow (K8/F8) — global, every mode
 
 K8/F8 used to drive a soft glow/blur halo (now merged into Knob 6/Fader 6's thickness hub —
@@ -350,9 +293,16 @@ now):**
 
 ## Known quirks worth knowing
 
-- **F7 keeps 4 roles at once** (Amplitude, Diversity for Mode 7, Diversity-spread for Mode 3,
-  line density) because they're all mode-exclusive — only one is ever active depending on
-  which mode you're in.
+- **Mode 7 spoke rotation has motion blur**: at high rotation speed, a single-instant sample
+  per frame aliases into an apparent reverse spin (wagon-wheel effect). The shader averages
+  6 samples across a simulated 1/60s exposure window to fix this — it reads as a smear/streak
+  at extreme speed rather than a strobe.
+- **Mode 7's Speed (Fader 2) flow direction is intentionally reversed** relative to every
+  other mode's use of the same Speed control — flipped only in that one calculation, so it
+  doesn't affect Speed anywhere else.
+- **F7 keeps 4 roles at once** (Amplitude, Spoke Density for Mode 7, Diversity-spread for
+  Mode 3, Knob 7's bar-spacing breathing rate for Mode 5) because they're all mode-exclusive —
+  only one is ever active depending on which mode you're in.
 - **Unbounded curves can outrun what's visible.** Pushed near the very top of travel, a
   control's underlying value can already be enormous (e.g. amplitude in the thousands) while
   looking visually identical to a slightly-lower setting, because the visual result has

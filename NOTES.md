@@ -201,6 +201,13 @@ input list explicitly if in doubt, rather than patching indices one at a time.
 
 ## Analytic logarithmic-spiral growth, and why straight lines read as "mechanical" not "organic"
 
+**Mode 7 itself was reverted back to the original "Odyssey" tunnel (`sceneTunnel()`) after
+this whole redesign, per direct feedback ("I don't like the new mode 7") — the entries below
+through "Raw per-band audio values flicker..." document the superstring work and the bugs
+found while building it, kept for reference since the techniques (DLA-style random walks,
+the sentinel-value bug pattern, the audio-smoothing lesson) are reusable elsewhere even though
+the feature that prompted them is no longer live.**
+
 For Mode 7's "superstring" redesign (organic cosmic patterns that grow like a plant), a
 logarithmic spiral `r(theta) = r0 * exp(k*theta)` is analytically invertible per-pixel:
 `thetaCurve = log(radiusPixel/r0) / k` gives the angle at which the coil would pass through
